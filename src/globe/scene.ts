@@ -17,6 +17,7 @@ import { buildSkyField, type SkySample, sampleSkyField } from "../weather/field"
 import { FOV, fitDistance, GlobeCameraRig, type GlobeView } from "./camera";
 import { CloudLayer } from "./clouds";
 import { CityMarkers, type MarkerCity, type MarkerContent, type MarkerLayout } from "./markers";
+import { frameInterval, IDLE_AFTER_MS } from "./pacing";
 import { NoiseVolume } from "./passes";
 import { createPlanet, type PlanetUniforms, solidTexture } from "./planet";
 import { Precipitation } from "./precipitation";
@@ -57,8 +58,6 @@ const ZOOM_IN_FACTOR = 0.72;
 const ZOOM_OUT_FACTOR = 1.38;
 const RETICLE_CLEARANCE_PX = 36;
 /** Drifting cloud needs far fewer frames than a drag. */
-const AMBIENT_FRAME_MS = 1000 / 30;
-const SOFTWARE_FRAME_MS = 1000 / 8;
 const INTRO_MS = 1700;
 const EXPOSURE = 7.5;
 
@@ -142,6 +141,7 @@ export class GlobeScene {
   private lastSunAt = Number.NEGATIVE_INFINITY;
   private lastTickAt = 0;
   private lastDrawAt = Number.NEGATIVE_INFINITY;
+  private lastActiveAt = 0;
   private time = 0;
   private intro: { until: number; interactions: number } | null = null;
   private revealed = false;
@@ -243,6 +243,8 @@ export class GlobeScene {
       .catch((error: unknown) => console.warn("Could not load stars", error));
 
     dom.addEventListener("pointerdown", this.handlePointerDown);
+    dom.addEventListener("wheel", this.markActive, { passive: true });
+    window.addEventListener("focus", this.markActive);
     dom.addEventListener("pointerup", this.handlePointerUp);
     dom.addEventListener("pointercancel", this.handlePointerCancel);
     dom.addEventListener("keydown", this.handleKeyDown);
@@ -328,6 +330,8 @@ export class GlobeScene {
     this.resizeObserver.disconnect();
     const dom = this.renderer.domElement;
     dom.removeEventListener("pointerdown", this.handlePointerDown);
+    dom.removeEventListener("wheel", this.markActive);
+    window.removeEventListener("focus", this.markActive);
     dom.removeEventListener("pointerup", this.handlePointerUp);
     dom.removeEventListener("pointercancel", this.handlePointerCancel);
     dom.removeEventListener("keydown", this.handleKeyDown);
@@ -553,9 +557,17 @@ export class GlobeScene {
     for (const tween of this.tweens) tweening = tween.step(dt) || tweening;
 
     // Frames are drawn on change; with motion allowed, the sky also drifts.
-    const busy = moved || tweening || this.clouds.transitioning || this.precipitation.active;
-    const ambient = this.software ? SOFTWARE_FRAME_MS : AMBIENT_FRAME_MS;
-    const due = this.dirty || (this.motion && (busy || now - this.lastDrawAt >= ambient - 2));
+    if (moved || this.rig.flying) this.lastActiveAt = now;
+    const busy = moved || tweening || this.clouds.transitioning;
+    const interval = frameInterval({
+      motion: this.motion,
+      software: this.software,
+      // A window in the background is idle too, unless something is moving it.
+      idle: now - this.lastActiveAt > IDLE_AFTER_MS || (!moved && !document.hasFocus()),
+      busy,
+      falling: this.precipitation.active,
+    });
+    const due = this.dirty || now - this.lastDrawAt >= interval - 2;
     if (!due) return;
 
     const sinceDraw = Math.min(0.1, (now - this.lastDrawAt) / 1000);
@@ -578,7 +590,7 @@ export class GlobeScene {
     );
     this.glare.update(this.camera);
 
-    this.pacePixelRatio(now, busy);
+    this.pacePixelRatio(now, busy || this.precipitation.active);
     this.dirty = false;
     this.lastDrawAt = now;
     if (this.markersStale) {
@@ -630,7 +642,13 @@ export class GlobeScene {
     this.dirty = true;
   };
 
+  /** Input of any kind brings the globe back to full pace. */
+  private markActive = (): void => {
+    this.lastActiveAt = performance.now();
+  };
+
   private handleKeyDown = (event: KeyboardEvent): void => {
+    this.markActive();
     // Leaves browser shortcuts alone, such as Ctrl+minus and Alt+Left.
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     const now = performance.now();
@@ -662,6 +680,7 @@ export class GlobeScene {
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
+    this.markActive();
     // A second finger is a pinch, and other mouse buttons aren't taps.
     this.tapStart =
       event.isPrimary && event.button === 0

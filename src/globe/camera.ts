@@ -26,6 +26,18 @@ interface Flight {
   ease: Easing;
 }
 
+/** Share of a drag's remaining motion applied per frame at 60 fps. */
+const DAMPING = 0.08;
+
+/**
+ * OrbitControls damps per frame, so its glide after a drag would last twice
+ * as long at 30 fps as at 60. Scaling the factor by frame time keeps the
+ * glide the same length in seconds at any frame rate.
+ */
+export function dampingFor(dt: number): number {
+  return Math.min(0.9, 1 - (1 - DAMPING) ** (Math.max(0, dt) * 60));
+}
+
 const easeInOut: Easing = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
 const easeOut: Easing = (t) => 1 - (1 - t) ** 3;
 
@@ -42,6 +54,7 @@ export function fitDistance(freeSize: number, height: number, margin = 0.92): nu
 export class GlobeCameraRig {
   private readonly controls: OrbitControls;
   private flight: Flight | null = null;
+  private lastUpdate: number | null = null;
   /** Counts drags, pinches and wheel turns, so callers can tell when the user took over. */
   interactions = 0;
 
@@ -53,7 +66,7 @@ export class GlobeCameraRig {
     const controls = new OrbitControls(camera, dom);
     controls.enablePan = false;
     controls.enableDamping = !reducedMotion;
-    controls.dampingFactor = 0.08;
+    controls.dampingFactor = DAMPING;
     controls.minDistance = MIN_DISTANCE;
     controls.minPolarAngle = Math.PI / 2 - POLE_MARGIN;
     controls.maxPolarAngle = Math.PI / 2 + POLE_MARGIN;
@@ -131,6 +144,9 @@ export class GlobeCameraRig {
 
   /** Advances any flight and the orbit controls. */
   update(now: number): void {
+    const dt = this.lastUpdate === null ? 1 / 60 : Math.min(0.25, (now - this.lastUpdate) / 1000);
+    this.lastUpdate = now;
+    this.controls.dampingFactor = dampingFor(dt);
     const distance = this.camera.position.length();
     const altitude = distance - 1;
 

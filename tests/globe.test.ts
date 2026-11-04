@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { Vector3 } from "three";
 import { describe, expect, it } from "vitest";
 import { PlaceIndex } from "../src/geo/places";
-import { fitDistance } from "../src/globe/camera";
+import { dampingFor, fitDistance } from "../src/globe/camera";
+import { frameInterval, type PaceState } from "../src/globe/pacing";
 import { starColor } from "../src/globe/stars";
 import { sunClearance } from "../src/globe/sunGlare";
 import { dayTextureFile } from "../src/globe/textures";
@@ -103,5 +104,44 @@ describe("sun glare", () => {
 
   it("ignores a sun behind the camera, out of view", () => {
     expect(sunClearance(new Vector3(0, 0, -3), sun).visible).toBe(0);
+  });
+});
+
+describe("frame pacing", () => {
+  const calm: PaceState = {
+    motion: true,
+    software: false,
+    idle: false,
+    busy: false,
+    falling: false,
+  };
+
+  it("draws every frame while the globe moves, and drifts cloud at 30 fps", () => {
+    expect(frameInterval({ ...calm, busy: true })).toBe(0);
+    expect(frameInterval(calm)).toBeCloseTo(1000 / 30);
+    expect(frameInterval({ ...calm, falling: true })).toBe(0);
+  });
+
+  it("slows down once idle, keeping falling rain smooth enough", () => {
+    expect(frameInterval({ ...calm, idle: true })).toBe(100);
+    expect(frameInterval({ ...calm, idle: true, falling: true })).toBe(50);
+  });
+
+  it("draws only on change when motion is reduced", () => {
+    expect(frameInterval({ ...calm, motion: false, busy: true })).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("spares a CPU doing the drawing, except while the user moves the globe", () => {
+    expect(frameInterval({ ...calm, software: true })).toBe(125);
+    expect(frameInterval({ ...calm, software: true, busy: true })).toBe(0);
+  });
+});
+
+describe("camera damping", () => {
+  it("glides for the same time at any frame rate", () => {
+    const remaining = (fps: number) => (1 - dampingFor(1 / fps)) ** fps;
+    expect(dampingFor(1 / 60)).toBeCloseTo(0.08);
+    expect(remaining(30)).toBeCloseTo(remaining(60), 6);
+    expect(remaining(120)).toBeCloseTo(remaining(60), 6);
   });
 });
