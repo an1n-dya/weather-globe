@@ -13,15 +13,21 @@ export interface GlobeView {
   distance: number;
 }
 
+type Easing = (t: number) => number;
+
 interface Flight {
   from: GlobeView;
   dLon: number;
   to: GlobeView;
   start: number;
   duration: number;
+  /** Extra distance at the middle of the flight, for an arc over long trips. */
+  lift: number;
+  ease: Easing;
 }
 
-const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
+const easeInOut: Easing = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+const easeOut: Easing = (t) => 1 - (1 - t) ** 3;
 
 /**
  * Distance at which a unit sphere just fits a free area of `freeSize` pixels
@@ -36,6 +42,8 @@ export function fitDistance(freeSize: number, height: number, margin = 0.92): nu
 export class GlobeCameraRig {
   private readonly controls: OrbitControls;
   private flight: Flight | null = null;
+  /** Counts drags, pinches and wheel turns, so callers can tell when the user took over. */
+  interactions = 0;
 
   constructor(
     private readonly camera: PerspectiveCamera,
@@ -51,6 +59,7 @@ export class GlobeCameraRig {
     controls.maxPolarAngle = Math.PI / 2 + POLE_MARGIN;
     controls.addEventListener("start", () => {
       this.flight = null;
+      this.interactions++;
     });
     this.controls = controls;
   }
@@ -59,6 +68,10 @@ export class GlobeCameraRig {
     const { x, y, z } = this.camera.position;
     const { lat, lon } = vec3ToLatLon(x, y, z);
     return { lat, lon, distance: this.camera.position.length() };
+  }
+
+  get flying(): boolean {
+    return this.flight !== null;
   }
 
   setMaxDistance(distance: number): void {
@@ -81,9 +94,18 @@ export class GlobeCameraRig {
       lon: target.lon,
       distance: this.clampDistance(target.distance ?? from.distance),
     };
-    const dLon = lonDelta(from.lon, to.lon);
-    const arc = Math.hypot(to.lat - from.lat, dLon);
-    this.startFlight(from, to, 500 + Math.min(arc, 180) * 7, now);
+    const arc = Math.hypot(to.lat - from.lat, lonDelta(from.lon, to.lon));
+    // Long trips rise for an overview on the way, as a plane would.
+    const ceiling = this.controls.maxDistance - Math.max(from.distance, to.distance);
+    const lift = Math.max(0, Math.min(ceiling, (Math.min(arc, 120) / 120) * 1.2));
+    this.startFlight(from, to, 650 + Math.min(arc, 180) * 7, now, lift, easeInOut);
+  }
+
+  /** The opening move: from further out, slowing as it arrives. */
+  arrive(view: GlobeView, fromDistance: number, duration: number, now: number): void {
+    const to = { ...view, distance: this.clampDistance(view.distance) };
+    this.place({ ...to, distance: fromDistance });
+    this.startFlight({ ...to, distance: fromDistance }, to, duration, now, 0, easeOut);
   }
 
   /** Arrow keys: a step sized so it moves the same distance on screen at any zoom. */
@@ -96,7 +118,7 @@ export class GlobeCameraRig {
       lon: from.lon + dLonScreens * step * lonScale,
       distance: from.distance,
     };
-    this.startFlight(from, to, 180, now);
+    this.startFlight(from, to, 180, now, 0, easeInOut);
   }
 
   /** factor < 1 moves closer. Altitude scales, so zooming is even at every height. */
@@ -104,7 +126,7 @@ export class GlobeCameraRig {
     const from = this.view;
     const { lat, lon, distance } = this.flight?.to ?? from;
     const to = { lat, lon, distance: this.clampDistance(1 + (distance - 1) * factor) };
-    this.startFlight(from, to, 180, now);
+    this.startFlight(from, to, 220, now, 0, easeOut);
   }
 
   /** Advances any flight and the orbit controls. */
@@ -121,13 +143,14 @@ export class GlobeCameraRig {
     this.controls.zoomSpeed = Math.log(nextDistance / distance) / Math.log(0.95);
 
     if (this.flight) {
-      const { from, to, dLon, start, duration } = this.flight;
-      const raw = Math.min(1, (now - start) / duration);
-      const t = easeInOut(raw);
+      const { from, to, dLon, start, duration, lift, ease } = this.flight;
+      const raw = Math.min(1, Math.max(0, (now - start) / duration));
+      const t = ease(raw);
       this.place({
         lat: from.lat + (to.lat - from.lat) * t,
         lon: from.lon + dLon * t,
-        distance: from.distance + (to.distance - from.distance) * t,
+        distance:
+          from.distance + (to.distance - from.distance) * t + lift * Math.sin(Math.PI * raw),
       });
       if (raw >= 1) this.flight = null;
     }
@@ -143,12 +166,19 @@ export class GlobeCameraRig {
     return (2 * TAN_HALF_FOV * (distance - 1) * 180) / Math.PI;
   }
 
-  private startFlight(from: GlobeView, to: GlobeView, duration: number, now: number): void {
+  private startFlight(
+    from: GlobeView,
+    to: GlobeView,
+    duration: number,
+    now: number,
+    lift: number,
+    ease: Easing,
+  ): void {
     if (this.reducedMotion) {
       this.jumpTo(to);
       return;
     }
-    this.flight = { from, to, dLon: lonDelta(from.lon, to.lon), start: now, duration };
+    this.flight = { from, to, dLon: lonDelta(from.lon, to.lon), start: now, duration, lift, ease };
   }
 
   private clampDistance(distance: number): number {

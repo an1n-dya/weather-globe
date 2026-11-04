@@ -275,6 +275,14 @@ export function InfoPanel() {
         <a href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">
           Natural Earth
         </a>
+        {" · "}
+        <a
+          href="https://science.nasa.gov/earth/earth-observatory/collections/blue-marble"
+          target="_blank"
+          rel="noreferrer"
+        >
+          NASA imagery
+        </a>
       </footer>
     </section>
   );

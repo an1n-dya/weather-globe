@@ -145,6 +145,11 @@ export class CityMarkers {
     }
   }
 
+  /** Markers fade in with the globe, rather than floating over an empty stage. */
+  reveal(): void {
+    this.layer.classList.add("is-revealed");
+  }
+
   /** The visible marker within reach of a tap, if any. */
   pick(x: number, y: number): MarkerCity | null {
     let best: MarkerCity | null = null;

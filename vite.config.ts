@@ -26,7 +26,8 @@ export default defineConfig({
       manifest: {
         name: "Weather Globe",
         short_name: "Globe",
-        description: "Spin a low-poly globe to see the local time and weather anywhere on Earth.",
+        description:
+          "Spin a realistic globe to see the local time and live weather anywhere on Earth.",
         theme_color: "#070d1f",
         background_color: "#070d1f",
         display: "standalone",
@@ -40,6 +41,14 @@ export default defineConfig({
         // The app shell and map data work offline. Weather always goes to the network.
         globPatterns: ["**/*.{js,css,html,svg,png,bin,json}"],
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+        // Earth imagery is kept once seen: only this month's maps, at the size in use.
+        runtimeCaching: [
+          {
+            urlPattern: /\/textures\/.+\.webp$/,
+            handler: "CacheFirst",
+            options: { cacheName: "textures", expiration: { maxEntries: 8 } },
+          },
+        ],
       },
     }),
   ],

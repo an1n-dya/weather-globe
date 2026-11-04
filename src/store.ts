@@ -8,6 +8,8 @@ import { type ForecastState, IDLE_FORECAST } from "./weather/forecastLoader";
 export interface Settings {
   unit: TempUnit;
   hour12: boolean;
+  /** Clouds, rain and snow over the globe. */
+  weather: boolean;
 }
 
 const SETTINGS_KEY = "weather-globe.settings.v1";
@@ -17,7 +19,7 @@ function defaultSettings(): Settings {
   const hour12 =
     new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12 ?? false;
   const region = navigator.language.split("-")[1]?.toUpperCase() ?? "";
-  return { hour12, unit: FAHRENHEIT_REGIONS.includes(region) ? "f" : "c" };
+  return { hour12, unit: FAHRENHEIT_REGIONS.includes(region) ? "f" : "c", weather: true };
 }
 
 function loadSettings(): Settings {
@@ -27,6 +29,7 @@ function loadSettings(): Settings {
     return {
       unit: saved.unit === "c" || saved.unit === "f" ? saved.unit : defaults.unit,
       hour12: typeof saved.hour12 === "boolean" ? saved.hour12 : defaults.hour12,
+      weather: typeof saved.weather === "boolean" ? saved.weather : defaults.weather,
     };
   } catch {
     return defaults;

@@ -1,8 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import majorCities from "../src/data/majorCities.json";
+import { latLonToVec3 } from "../src/geo/coords";
 import { snapToCell, TtlCache } from "../src/weather/cache";
-import { startCityWeather } from "../src/weather/cityWeather";
+import { skyFor } from "../src/weather/conditions";
+import {
+  buildSkyField,
+  climateCloud,
+  FIELD_HEIGHT,
+  FIELD_WIDTH,
+  sampleSkyField,
+} from "../src/weather/field";
 import { ForecastLoader, type ForecastState } from "../src/weather/forecastLoader";
-import { type Forecast, fetchCitiesCurrent, parseForecast } from "../src/weather/provider";
+import { type Forecast, fetchCurrentBatch, parseForecast } from "../src/weather/provider";
+import { skyPoints } from "../src/weather/skyPoints";
+import { startSkyWeather } from "../src/weather/skyWeather";
 import { describeWeatherCode, WMO_CODES } from "../src/weather/wmo";
 
 describe("weather codes", () => {
@@ -61,10 +72,14 @@ const forecastNamed = (timezone: string): Forecast => ({
     feelsLike: 19,
     humidity: 50,
     wind: 10,
+    windDirection: null,
     code: 0,
     isDay: true,
+    cloudCover: null,
+    precipitation: null,
   },
   hourly: [],
+  daily: [],
   sunrise: null,
   sunset: null,
 });
@@ -240,13 +255,46 @@ describe("forecast parsing", () => {
     },
   };
 
-  it("starts the hourly strip at the current local hour", () => {
+  it("starts the hourly strip at the current local hour and covers a day", () => {
     const forecast = parseForecast(raw);
-    expect(forecast.hourly).toHaveLength(12);
+    expect(forecast.hourly).toHaveLength(24);
     expect(forecast.hourly[0]?.time).toBe("2026-11-04T13:00");
-    expect(forecast.hourly[11]?.time).toBe("2026-11-05T00:00");
+    expect(forecast.hourly[23]?.time).toBe("2026-11-05T12:00");
     expect(forecast.current.isDay).toBe(true);
     expect(forecast.sunrise).toBe("2026-11-04T05:42");
+  });
+
+  it("reads optional values as unknown when the service leaves them out", () => {
+    const forecast = parseForecast(raw);
+    expect(forecast.current.windDirection).toBeNull();
+    expect(forecast.current.cloudCover).toBeNull();
+    expect(forecast.hourly[0]?.precipChance).toBeNull();
+    expect(forecast.daily).toEqual([]);
+  });
+
+  it("reads the daily outlook and precipitation chances", () => {
+    const forecast = parseForecast({
+      ...raw,
+      current: { ...raw.current, wind_direction_10m: 250, cloud_cover: 80, precipitation: 0.4 },
+      hourly: { ...raw.hourly, precipitation_probability: raw.hourly.time.map((_, i) => i) },
+      daily: {
+        ...raw.daily,
+        weather_code: [61, 3],
+        temperature_2m_max: [31, 29.5],
+        temperature_2m_min: [22, null],
+        precipitation_probability_max: [70, null],
+      },
+    });
+    expect(forecast.current).toMatchObject({
+      windDirection: 250,
+      cloudCover: 80,
+      precipitation: 0.4,
+    });
+    expect(forecast.hourly[0]?.precipChance).toBe(13);
+    // A day missing its low is left out rather than shown wrong.
+    expect(forecast.daily).toEqual([
+      { date: "2026-11-04", code: 61, high: 31, low: 22, precipChance: 70 },
+    ]);
   });
 
   it("treats the identical midnight times of polar night as no sunrise", () => {
@@ -305,7 +353,7 @@ describe("forecast parsing", () => {
       },
     });
     expect(gappy.hourly.map((h) => h.time)).not.toContain("2026-11-04T14:00");
-    expect(gappy.hourly).toHaveLength(12);
+    expect(gappy.hourly).toHaveLength(24);
   });
 
   it("treats a missing or wrong-day sunrise as none", () => {
@@ -318,7 +366,7 @@ describe("forecast parsing", () => {
   });
 });
 
-describe("city weather batch", () => {
+describe("current conditions batch", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("keeps order and turns rows without data into gaps", async () => {
@@ -326,28 +374,48 @@ describe("city weather batch", () => {
       "fetch",
       vi.fn(async () =>
         Response.json([
-          { current: { temperature_2m: 10, weather_code: 3 } },
+          {
+            current: {
+              temperature_2m: 10,
+              weather_code: 3,
+              cloud_cover: 90,
+              wind_direction_10m: 200,
+            },
+          },
           { current: { temperature_2m: null, weather_code: 3 } },
           {},
         ]),
       ),
     );
-    const rows = await fetchCitiesCurrent([
+    const rows = await fetchCurrentBatch([
       { lat: 1, lon: 1 },
       { lat: 2, lon: 2 },
       { lat: 3, lon: 3 },
     ]);
-    expect(rows).toEqual([{ temp: 10, code: 3 }, null, null]);
+    expect(rows).toEqual([
+      {
+        temp: 10,
+        code: 3,
+        cloudCover: 90,
+        precipitation: null,
+        windSpeed: null,
+        windDirection: 200,
+      },
+      null,
+      null,
+    ]);
   });
 });
 
-describe("city weather refresh", () => {
+describe("sky weather refresh", () => {
   const CITIES = [{ lat: 1, lon: 2 }];
-  const ROWS = [{ temp: 20, code: 1 }];
+  const ROWS = [
+    { temp: 20, code: 1, cloudCover: 10, precipitation: 0, windSpeed: 5, windDirection: 90 },
+  ];
   const HOUR = 3_600_000;
   const save = (fetchedAt: number) =>
     localStorage.setItem(
-      "weather-globe.city-weather.v1",
+      "weather-globe.sky-weather.v2",
       JSON.stringify({ fetchedAt, keys: ["1,2"], rows: ROWS }),
     );
   let store: Map<string, string>;
@@ -381,10 +449,11 @@ describe("city weather refresh", () => {
   });
 
   it("shows recently saved weather without a request", () => {
-    save(Date.now() - HOUR / 2);
+    const savedAt = Date.now() - HOUR / 2;
+    save(savedAt);
     const onData = vi.fn();
-    stop = startCityWeather(CITIES, onData);
-    expect(onData).toHaveBeenCalledWith(ROWS);
+    stop = startSkyWeather(CITIES, onData);
+    expect(onData).toHaveBeenCalledWith(ROWS, savedAt);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -392,7 +461,7 @@ describe("city weather refresh", () => {
     save(Date.now() - 7 * HOUR);
     fetchMock.mockRejectedValue(new Error("offline"));
     const onData = vi.fn();
-    stop = startCityWeather(CITIES, onData);
+    stop = startSkyWeather(CITIES, onData);
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(onData).not.toHaveBeenCalled();
@@ -401,15 +470,27 @@ describe("city weather refresh", () => {
   it("refreshes and saves once the data is an hour old", async () => {
     save(Date.now() - 2 * HOUR);
     const onData = vi.fn();
-    stop = startCityWeather(CITIES, onData);
+    stop = startSkyWeather(CITIES, onData);
     await vi.advanceTimersByTimeAsync(0);
-    expect(onData).toHaveBeenLastCalledWith([{ temp: 5, code: 0 }]);
-    expect(store.get("weather-globe.city-weather.v1")).toContain('"temp":5');
+    expect(onData).toHaveBeenLastCalledWith(
+      [
+        {
+          temp: 5,
+          code: 0,
+          cloudCover: null,
+          precipitation: null,
+          windSpeed: null,
+          windDirection: null,
+        },
+      ],
+      Date.now(),
+    );
+    expect(store.get("weather-globe.sky-weather.v2")).toContain('"temp":5');
   });
 
   it("retries after a failure, sooner than the hourly refresh, with increasing delays", async () => {
     fetchMock.mockRejectedValue(new Error("HTTP 429"));
-    stop = startCityWeather(CITIES, vi.fn());
+    stop = startSkyWeather(CITIES, vi.fn());
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
@@ -421,5 +502,93 @@ describe("city weather refresh", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("sky conditions", () => {
+  it("reads precipitation type and strength from the weather code", () => {
+    expect(skyFor(0)).toMatchObject({ precip: 0, thunder: 0 });
+    expect(skyFor(0).cloud).toBeLessThan(0.1);
+    expect(skyFor(65).precip).toBeGreaterThan(skyFor(61).precip);
+    expect(skyFor(75)).toMatchObject({ snow: 1 });
+    expect(skyFor(99)).toMatchObject({ thunder: 1, hail: true });
+    expect(skyFor(45).fog).toBe(1);
+  });
+
+  it("prefers measured cloud cover, but never calls a wet sky clear", () => {
+    expect(skyFor(2, { cloudCover: 20 }).cloud).toBeCloseTo(0.2);
+    expect(skyFor(61, { cloudCover: 5 }).cloud).toBeGreaterThan(0.7);
+  });
+
+  it("finds rain the code missed, as snow when it's freezing", () => {
+    const rain = skyFor(3, { precipitation: 2, temp: 12 });
+    expect(rain.precip).toBeGreaterThan(0.5);
+    expect(rain.snow).toBe(0);
+    expect(skyFor(3, { precipitation: 2, temp: -6 }).snow).toBe(1);
+  });
+
+  it("has an answer for an unknown code", () => {
+    expect(skyFor(1234)).toMatchObject({ precip: 0, thunder: 0, fog: 0 });
+  });
+});
+
+describe("sky field", () => {
+  const date = new Date("2026-11-04T12:00:00Z");
+  const sample = (lat: number, lon: number, code: number) => ({ lat, lon, sky: skyFor(code) });
+
+  it("follows samples where they are and the climate where they aren't", () => {
+    const field = buildSkyField([sample(10, 20, 0), sample(50, -30, 65)], date);
+    expect(field).toHaveLength(FIELD_WIDTH * FIELD_HEIGHT * 4);
+    expect(sampleSkyField(field, 10, 20).cloud).toBeLessThan(0.15);
+    const storm = sampleSkyField(field, 50, -30);
+    expect(storm.cloud).toBeGreaterThan(0.9);
+    expect(storm.precip).toBeGreaterThan(0.7);
+    // Rain stays near the sample that reported it.
+    expect(sampleSkyField(field, 50, 10).precip).toBe(0);
+    const far = sampleSkyField(field, -40, 150);
+    expect(far.cloud).toBeCloseTo(climateCloud(-40, 150, 308.5), 1);
+  });
+
+  it("wraps across the antimeridian", () => {
+    const field = buildSkyField([sample(0, 179.5, 63)], date);
+    expect(sampleSkyField(field, 0, -179.5).precip).toBeGreaterThan(0.4);
+    expect(sampleSkyField(field, 0, 179.9).precip).toBeCloseTo(
+      sampleSkyField(field, 0, -179.9).precip,
+      2,
+    );
+  });
+
+  it("keeps the snow share and lightning of what falls", () => {
+    const field = buildSkyField([sample(60, 90, 75), sample(-5, -60, 95)], date);
+    expect(sampleSkyField(field, 60, 90).snow).toBeGreaterThan(0.95);
+    expect(sampleSkyField(field, -5, -60).thunder).toBeGreaterThan(0.5);
+    expect(sampleSkyField(field, -5, -60).snow).toBe(0);
+  });
+
+  it("puts the climate's clouds where they belong", () => {
+    const july = 196;
+    expect(climateCloud(23, 10, july)).toBeLessThan(0.2); // Sahara
+    expect(climateCloud(-58, 0, july)).toBeGreaterThan(0.7); // Southern Ocean
+    expect(climateCloud(8, -140, july)).toBeGreaterThan(climateCloud(25, -140, july)); // ITCZ
+  });
+});
+
+describe("sky points", () => {
+  it("fill the gaps between cities, far from all of them", () => {
+    const points = skyPoints(majorCities);
+    expect(points.length).toBeGreaterThan(80);
+    expect(points.length).toBeLessThan(130);
+    const minDot = Math.cos(990 / 6371);
+    for (const point of points) {
+      const [x, y, z] = latLonToVec3(point.lat, point.lon);
+      for (const city of majorCities) {
+        const [cx, cy, cz] = latLonToVec3(city.lat, city.lon);
+        expect(x * cx + y * cy + z * cz).toBeLessThan(minDot);
+      }
+    }
+  });
+
+  it("are the same every time, so saved rows stay aligned", () => {
+    expect(skyPoints(majorCities)).toEqual(skyPoints(majorCities));
   });
 });

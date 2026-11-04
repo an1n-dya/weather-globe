@@ -33,6 +33,16 @@ export function subsolarPoint(date: Date): { lat: number; lon: number } {
   return { lat: declination / DEG, lon };
 }
 
+/**
+ * Greenwich mean sidereal time as an angle in degrees: how far the stars have
+ * turned past Greenwich. A star at right ascension α stands over longitude
+ * α minus this angle.
+ */
+export function siderealDeg(date: Date): number {
+  const days = date.getTime() / MS_PER_DAY + 2440587.5 - 2451545;
+  return (((280.46061837 + 360.98564736629 * days) % 360) + 360) % 360;
+}
+
 export function sunDirection(date: Date): Vec3 {
   const { lat, lon } = subsolarPoint(date);
   return latLonToVec3(lat, lon);

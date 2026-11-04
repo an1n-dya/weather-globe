@@ -1,10 +1,12 @@
 /**
  * Checks time zones against the live weather service and fixed expected
- * offsets, and exercises the real API. Makes about 110 calls of the free quota.
+ * offsets, and exercises the real API. Makes about 230 calls of the free quota:
+ * the hourly batch counts each of its places.
  */
 import majorCities from "../src/data/majorCities.json";
 import { formatOffset, zoneFor, zoneOffsetMinutes } from "../src/geo/timezone";
-import { fetchCitiesCurrent, fetchForecast, searchPlaces } from "../src/weather/provider";
+import { fetchCurrentBatch, fetchForecast, searchPlaces } from "../src/weather/provider";
+import { skyPoints } from "../src/weather/skyPoints";
 
 // A fixed moment, so the expected offsets below hold whatever the season when this runs.
 const REFERENCE_DATE = new Date("2026-11-04T12:00:00Z");
@@ -36,13 +38,18 @@ for (const { name, lat, lon, expected, ocean = false } of places) {
   console.log(
     `${ok ? "ok  " : "DIFF"} ${name.padEnd(12)} expected ${expected.padEnd(9)} estimate ${estimated} ${estimatedOffset}` +
       ` | service ${forecast.timezone} ${liveOffset}` +
-      ` | ${forecast.current.temp}°C code ${forecast.current.code} sunrise ${forecast.sunrise} sunset ${forecast.sunset} hours ${forecast.hourly.length}`,
+      ` | ${forecast.current.temp}°C code ${forecast.current.code} sunrise ${forecast.sunrise} sunset ${forecast.sunset}` +
+      ` hours ${forecast.hourly.length} days ${forecast.daily.length}`,
   );
 }
 
-const rows = await fetchCitiesCurrent(majorCities);
-console.log(`batch: ${rows.filter(Boolean).length} of ${majorCities.length} cities returned`);
-if (rows.length !== majorCities.length || rows.some((r) => !r)) failures++;
+const points = [...majorCities, ...skyPoints(majorCities)];
+const rows = await fetchCurrentBatch(points);
+const withCloud = rows.filter((row) => row?.cloudCover != null).length;
+console.log(
+  `batch: ${rows.filter(Boolean).length} of ${points.length} places, ${withCloud} with cloud cover`,
+);
+if (rows.length !== points.length || rows.some((row) => !row)) failures++;
 
 const found = await searchPlaces("Kathmandu");
 console.log(`search: ${found[0]?.name}, ${found[0]?.country} (${found[0]?.lat}, ${found[0]?.lon})`);
