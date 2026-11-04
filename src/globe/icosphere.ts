@@ -18,16 +18,41 @@ export const FREQUENCY_LOW = 40;
 const PHI = (1 + Math.sqrt(5)) / 2;
 
 const BASE_VERTICES: ReadonlyArray<readonly [number, number, number]> = [
-  [-1, PHI, 0], [1, PHI, 0], [-1, -PHI, 0], [1, -PHI, 0],
-  [0, -1, PHI], [0, 1, PHI], [0, -1, -PHI], [0, 1, -PHI],
-  [PHI, 0, -1], [PHI, 0, 1], [-PHI, 0, -1], [-PHI, 0, 1],
+  [-1, PHI, 0],
+  [1, PHI, 0],
+  [-1, -PHI, 0],
+  [1, -PHI, 0],
+  [0, -1, PHI],
+  [0, 1, PHI],
+  [0, -1, -PHI],
+  [0, 1, -PHI],
+  [PHI, 0, -1],
+  [PHI, 0, 1],
+  [-PHI, 0, -1],
+  [-PHI, 0, 1],
 ];
 
 const BASE_FACES: ReadonlyArray<readonly [number, number, number]> = [
-  [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
-  [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
-  [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
-  [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+  [0, 11, 5],
+  [0, 5, 1],
+  [0, 1, 7],
+  [0, 7, 10],
+  [0, 10, 11],
+  [1, 5, 9],
+  [5, 11, 4],
+  [11, 10, 2],
+  [10, 7, 6],
+  [7, 1, 8],
+  [3, 9, 4],
+  [3, 4, 2],
+  [3, 2, 6],
+  [3, 6, 8],
+  [3, 8, 9],
+  [4, 9, 5],
+  [2, 4, 11],
+  [6, 2, 10],
+  [8, 6, 7],
+  [9, 8, 1],
 ];
 
 export function faceCount(frequency: number): number {
@@ -56,9 +81,9 @@ export function buildIcosphere(frequency: number): Icosphere {
   };
 
   for (const [ia, ib, ic] of BASE_FACES) {
-    const a = BASE_VERTICES[ia];
-    const b = BASE_VERTICES[ib];
-    const c = BASE_VERTICES[ic];
+    const a = BASE_VERTICES[ia]!;
+    const b = BASE_VERTICES[ib]!;
+    const c = BASE_VERTICES[ic]!;
 
     // rows[i][j] is the point i steps from a toward b and j steps toward c.
     const rows: number[][] = [];
@@ -79,13 +104,15 @@ export function buildIcosphere(frequency: number): Icosphere {
 
     for (let i = 0; i < frequency; i++) {
       for (let j = 0; j < frequency - i; j++) {
-        faces[faceCursor++] = rows[i][j];
-        faces[faceCursor++] = rows[i + 1][j];
-        faces[faceCursor++] = rows[i][j + 1];
+        const row = rows[i]!;
+        const next = rows[i + 1]!;
+        faces[faceCursor++] = row[j]!;
+        faces[faceCursor++] = next[j]!;
+        faces[faceCursor++] = row[j + 1]!;
         if (j < frequency - i - 1) {
-          faces[faceCursor++] = rows[i + 1][j];
-          faces[faceCursor++] = rows[i + 1][j + 1];
-          faces[faceCursor++] = rows[i][j + 1];
+          faces[faceCursor++] = next[j]!;
+          faces[faceCursor++] = next[j + 1]!;
+          faces[faceCursor++] = row[j + 1]!;
         }
       }
     }

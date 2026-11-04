@@ -5,14 +5,14 @@
  *
  * The archive is read in memory and only ever parsed as tab-separated text.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { unzipSync } from 'fflate';
-import { angularDistanceDeg } from '../src/geo/coords';
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { unzipSync } from "fflate";
+import { angularDistanceDeg } from "../src/geo/coords";
 
-const SOURCE = 'https://download.geonames.org/export/dump/cities15000.zip';
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const SOURCE = "https://download.geonames.org/export/dump/cities15000.zip";
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 interface City {
   name: string;
@@ -24,30 +24,36 @@ interface City {
 }
 
 /** Sections of larger cities, abandoned places and the like are not useful names. */
-const EXCLUDED_FEATURES = new Set(['PPLX', 'PPLH', 'PPLQ', 'PPLW', 'PPLCH']);
+const EXCLUDED_FEATURES = new Set(["PPLX", "PPLH", "PPLQ", "PPLW", "PPLCH"]);
 
 const MUST_INCLUDE = [
-  ['Los Angeles', 'US'], ['San Francisco', 'US'], ['Chicago', 'US'], ['Washington', 'US'],
-  ['Toronto', 'CA'], ['Sydney', 'AU'], ['Dubai', 'AE'], ['Kolkata', 'IN'],
+  ["Los Angeles", "US"],
+  ["San Francisco", "US"],
+  ["Chicago", "US"],
+  ["Washington", "US"],
+  ["Toronto", "CA"],
+  ["Sydney", "AU"],
+  ["Dubai", "AE"],
+  ["Kolkata", "IN"],
 ];
 
 async function download(): Promise<City[]> {
   const response = await fetch(SOURCE);
   if (!response.ok) throw new Error(`GeoNames download failed: HTTP ${response.status}`);
   const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
-  const text = new TextDecoder().decode(files['cities15000.txt']);
+  const text = new TextDecoder().decode(files["cities15000.txt"]!);
 
   const cities: City[] = [];
-  for (const line of text.split('\n')) {
-    const cols = line.split('\t');
-    if (cols.length < 15 || EXCLUDED_FEATURES.has(cols[7])) continue;
+  for (const line of text.split("\n")) {
+    const cols = line.split("\t");
+    if (cols.length < 15 || EXCLUDED_FEATURES.has(cols[7]!)) continue;
     cities.push({
-      name: cols[1],
+      name: cols[1]!,
       lat: Number(cols[4]),
       lon: Number(cols[5]),
-      country: cols[8],
+      country: cols[8]!,
       pop: Number(cols[14]),
-      capital: cols[7] === 'PPLC',
+      capital: cols[7] === "PPLC",
     });
   }
   return cities.sort((a, b) => b.pop - a.pop);
@@ -105,18 +111,22 @@ const major = selectMajor(cities);
 
 // Compact rows: [name, country, lat, lon, population].
 const rows = cities.map((c) => [c.name, c.country, round(c.lat), round(c.lon), c.pop]);
-mkdirSync(join(root, 'public/data'), { recursive: true });
-writeFileSync(join(root, 'public/data/cities.json'), JSON.stringify(rows));
+mkdirSync(join(root, "public/data"), { recursive: true });
+writeFileSync(join(root, "public/data/cities.json"), JSON.stringify(rows));
 
-mkdirSync(join(root, 'src/data'), { recursive: true });
+mkdirSync(join(root, "src/data"), { recursive: true });
 writeFileSync(
-  join(root, 'src/data/majorCities.json'),
+  join(root, "src/data/majorCities.json"),
   JSON.stringify(
-    major.map((c) => ({ name: c.name, country: c.country, lat: round(c.lat), lon: round(c.lon), pop: c.pop })),
-    null,
-    0,
+    major.map((c) => ({
+      name: c.name,
+      country: c.country,
+      lat: round(c.lat),
+      lon: round(c.lon),
+      pop: c.pop,
+    })),
   ),
 );
 
 console.log(`${rows.length} cities, ${major.length} major:`);
-console.log(major.map((c) => c.name).join(', '));
+console.log(major.map((c) => c.name).join(", "));

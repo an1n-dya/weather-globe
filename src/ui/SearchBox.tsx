@@ -1,15 +1,16 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
-import { goToNamed } from '../controller';
-import { searchPlaces, type SearchResult } from '../weather/provider';
+import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
+import { goToNamed } from "../controller";
+import { type SearchResult, searchPlaces } from "../weather/provider";
 
-type SearchStatus = 'idle' | 'searching' | 'done' | 'error';
+type SearchStatus = "idle" | "searching" | "done" | "error";
 
 const DEBOUNCE_MS = 300;
+const MIN_QUERY_LENGTH = 2;
 
 export function SearchBox() {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
-  const [status, setStatus] = useState<SearchStatus>('idle');
+  const [status, setStatus] = useState<SearchStatus>("idle");
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -17,22 +18,25 @@ export function SearchBox() {
 
   useEffect(() => {
     const text = query.trim();
-    if (text.length < 2) {
+    if (text.length < MIN_QUERY_LENGTH) {
       setResults([]);
-      setStatus('idle');
+      setStatus("idle");
       return;
     }
     const controller = new AbortController();
-    setStatus('searching');
+    setStatus("searching");
     const timer = setTimeout(() => {
       searchPlaces(text, controller.signal).then(
         (found) => {
+          if (controller.signal.aborted) return;
           setResults(found);
           setActive(0);
-          setStatus('done');
+          setStatus("done");
         },
         () => {
-          if (!controller.signal.aborted) setStatus('error');
+          if (controller.signal.aborted) return;
+          setResults([]);
+          setStatus("error");
         },
       );
     }, DEBOUNCE_MS);
@@ -45,27 +49,30 @@ export function SearchBox() {
   const choose = (result: SearchResult) => {
     goToNamed(result.lat, result.lon, result.name, result.country);
     setOpen(false);
-    setQuery('');
+    setQuery("");
     inputRef.current?.blur();
   };
 
+  const activeResult = results[active];
+
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Escape') {
+    if (event.key === "Escape") {
       setOpen(false);
-    } else if (event.key === 'ArrowDown' && results.length) {
+    } else if (event.key === "ArrowDown" && results.length) {
       event.preventDefault();
       setOpen(true);
       setActive((i) => (i + 1) % results.length);
-    } else if (event.key === 'ArrowUp' && results.length) {
+    } else if (event.key === "ArrowUp" && results.length) {
       event.preventDefault();
       setActive((i) => (i - 1 + results.length) % results.length);
-    } else if (event.key === 'Enter' && results[active]) {
+    } else if (event.key === "Enter" && activeResult && status === "done") {
+      // While searching, the list still shows results for the previous text.
       event.preventDefault();
-      choose(results[active]);
+      choose(activeResult);
     }
   };
 
-  const showList = open && query.trim().length >= 2;
+  const showList = open && query.trim().length >= MIN_QUERY_LENGTH;
 
   return (
     <div className="search">
@@ -80,9 +87,9 @@ export function SearchBox() {
         placeholder="Search for a place"
         aria-label="Search for a place"
         aria-expanded={showList}
-        aria-controls={listId}
+        aria-controls={showList ? listId : undefined}
         aria-autocomplete="list"
-        aria-activedescendant={showList && results[active] ? `${listId}-${active}` : undefined}
+        aria-activedescendant={showList && activeResult ? `${listId}-${active}` : undefined}
         autoComplete="off"
         value={query}
         onChange={(event) => {
@@ -94,28 +101,36 @@ export function SearchBox() {
         onKeyDown={onKeyDown}
       />
       {showList && (
-        <ul id={listId} role="listbox" className="search-results">
-          {results.map((result, i) => (
-            <li
-              key={result.id}
-              id={`${listId}-${i}`}
-              role="option"
-              aria-selected={i === active}
-              className={i === active ? 'is-active' : undefined}
-              // Keeps focus in the input, so the blur does not close the list first.
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => choose(result)}
-            >
-              <span className="search-name">{result.name}</span>
-              <span className="search-region">
-                {[result.admin, result.country].filter(Boolean).join(', ')}
-              </span>
-            </li>
-          ))}
-          {status === 'searching' && results.length === 0 && <li className="search-status">Searching…</li>}
-          {status === 'done' && results.length === 0 && <li className="search-status">No places found</li>}
-          {status === 'error' && <li className="search-status">Search isn't available right now</li>}
-        </ul>
+        <div className="search-results">
+          {results.length > 0 && (
+            <div id={listId} role="listbox" aria-label="Places">
+              {results.map((result, i) => (
+                <button
+                  key={result.id}
+                  id={`${listId}-${i}`}
+                  type="button"
+                  role="option"
+                  // The input keeps focus; arrow keys move the highlight through aria-activedescendant.
+                  tabIndex={-1}
+                  aria-selected={i === active}
+                  className={i === active ? "search-option is-active" : "search-option"}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => choose(result)}
+                >
+                  <span className="search-name">{result.name}</span>
+                  <span className="search-region">
+                    {[result.admin, result.country].filter(Boolean).join(", ")}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div role="status" className="search-status">
+            {status === "searching" && results.length === 0 && "Searching…"}
+            {status === "done" && results.length === 0 && "No places found"}
+            {status === "error" && "Search isn't available right now"}
+          </div>
+        </div>
       )}
     </div>
   );

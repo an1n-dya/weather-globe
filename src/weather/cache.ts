@@ -1,4 +1,4 @@
-import { normalizeLon } from '../geo/coords';
+import { normalizeLon } from "../geo/coords";
 
 export interface CacheEntry<T> {
   value: T;

@@ -2,6 +2,13 @@ export const DEG = Math.PI / 180;
 
 export type Vec3 = [number, number, number];
 
+/** The camera stops just short of the poles, where "north up" has no meaning. */
+const MAX_VIEW_LAT = 89;
+
+export function clampViewLat(lat: number): number {
+  return Math.max(-MAX_VIEW_LAT, Math.min(MAX_VIEW_LAT, lat));
+}
+
 /**
  * Globe convention: +Y is north. Longitude 0 faces +Z and east is +X, so with
  * the camera outside the sphere and north up, east is on the right.
@@ -48,7 +55,7 @@ export function angularDistanceDeg(
 }
 
 export function formatCoords(lat: number, lon: number): string {
-  const ns = lat >= 0 ? 'N' : 'S';
-  const ew = lon >= 0 ? 'E' : 'W';
+  const ns = lat >= 0 ? "N" : "S";
+  const ew = lon >= 0 ? "E" : "W";
   return `${Math.abs(lat).toFixed(2)}°${ns} ${Math.abs(lon).toFixed(2)}°${ew}`;
 }

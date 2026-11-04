@@ -1,7 +1,7 @@
-import { snapToCell, TtlCache } from './cache';
-import type { Forecast } from './provider';
+import { snapToCell, TtlCache } from "./cache";
+import type { Forecast } from "./provider";
 
-export type ForecastStatus = 'idle' | 'loading' | 'ready' | 'error';
+type ForecastStatus = "idle" | "loading" | "ready" | "error";
 
 export interface ForecastState {
   key: string | null;
@@ -15,7 +15,7 @@ export interface ForecastState {
 
 export const IDLE_FORECAST: ForecastState = {
   key: null,
-  status: 'idle',
+  status: "idle",
   data: null,
   fetchedAt: null,
   retryAt: null,
@@ -41,8 +41,8 @@ interface LoaderOptions {
 export class ForecastLoader {
   private readonly cache: TtlCache<Forecast>;
   private readonly now: () => number;
-  private readonly setTimer: NonNullable<LoaderOptions['setTimer']>;
-  private readonly clearTimer: NonNullable<LoaderOptions['clearTimer']>;
+  private readonly setTimer: NonNullable<LoaderOptions["setTimer"]>;
+  private readonly clearTimer: NonNullable<LoaderOptions["clearTimer"]>;
   private cell: ReturnType<typeof snapToCell> | null = null;
   private controller: AbortController | null = null;
   private generation = 0;
@@ -87,6 +87,8 @@ export class ForecastLoader {
   }
 
   private cancelPending(): void {
+    // Whatever is running no longer counts, even if the abort comes too late to stop it.
+    this.generation++;
     this.controller?.abort();
     this.controller = null;
     this.inFlight = false;
@@ -104,7 +106,7 @@ export class ForecastLoader {
     if (entry && this.cache.isFresh(entry)) {
       this.publish({
         key: cell.key,
-        status: 'ready',
+        status: "ready",
         data: entry.value,
         fetchedAt: entry.fetchedAt,
         retryAt: null,
@@ -114,7 +116,7 @@ export class ForecastLoader {
 
     this.publish({
       key: cell.key,
-      status: 'loading',
+      status: "loading",
       data: entry?.value ?? null,
       fetchedAt: entry?.fetchedAt ?? null,
       retryAt: null,
@@ -133,7 +135,7 @@ export class ForecastLoader {
         this.attempts = 0;
         this.publish({
           key: cell.key,
-          status: 'ready',
+          status: "ready",
           data: forecast,
           fetchedAt: saved.fetchedAt,
           retryAt: null,
@@ -147,7 +149,7 @@ export class ForecastLoader {
         const stale = this.cache.get(cell.key);
         this.publish({
           key: cell.key,
-          status: 'error',
+          status: "error",
           data: stale?.value ?? null,
           fetchedAt: stale?.fetchedAt ?? null,
           retryAt: this.now() + delay,

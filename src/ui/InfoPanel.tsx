@@ -1,16 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
-import { retryForecast, updateSettings } from '../controller';
-import { formatCoords } from '../geo/coords';
-import {
-  estimateZone,
-  formatDifference,
-  formatOffset,
-  nominalZone,
-  zoneOffsetMinutes,
-} from '../geo/timezone';
-import { forecastForSelection, useStore } from '../store';
-import type { Forecast } from '../weather/provider';
-import { describeWeatherCode } from '../weather/wmo';
+import { useEffect, useMemo, useState } from "react";
+import { retryForecast, updateSettings } from "../controller";
+import { formatCoords } from "../geo/coords";
+import { formatDifference, formatOffset, zoneFor, zoneOffsetMinutes } from "../geo/timezone";
+import { forecastForSelection, useStore } from "../store";
+import type { Forecast } from "../weather/provider";
+import { describeWeatherCode } from "../weather/wmo";
 import {
   formatAge,
   formatClock,
@@ -19,8 +13,8 @@ import {
   formatLocalTime,
   formatTemperature,
   formatWind,
-} from './format';
-import { iconSvg } from './icons';
+} from "./format";
+import { iconSrc } from "./icons";
 
 /** Re-renders on each new second, so the clock never skips or lags. */
 function useNow(): Date {
@@ -28,10 +22,13 @@ function useNow(): Date {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
     const schedule = () => {
-      timer = setTimeout(() => {
-        setNow(new Date());
-        schedule();
-      }, 1000 - (Date.now() % 1000));
+      timer = setTimeout(
+        () => {
+          setNow(new Date());
+          schedule();
+        },
+        1000 - (Date.now() % 1000),
+      );
     };
     schedule();
     return () => clearTimeout(timer);
@@ -39,22 +36,33 @@ function useNow(): Date {
   return now;
 }
 
-function Icon({ name, isDay, className }: { name: Parameters<typeof iconSvg>[0]; isDay: boolean; className: string }) {
-  return <span className={className} dangerouslySetInnerHTML={{ __html: iconSvg(name, isDay) }} />;
-}
-
-function Headline({ data }: { data: Forecast }) {
+/** `staleNote` says when the weather shown is older than it should be. */
+function Headline({ data, staleNote }: { data: Forecast; staleNote: string | null }) {
   const unit = useStore((s) => s.settings.unit);
   const condition = describeWeatherCode(data.current.code);
   return (
     <div className="weather-headline" data-testid="weather">
-      <Icon name={condition.icon} isDay={data.current.isDay} className="weather-icon" />
+      <img
+        className="weather-icon"
+        src={iconSrc(condition.icon, data.current.isDay)}
+        alt=""
+        width={56}
+        height={56}
+      />
       <div className="weather-temp" data-testid="temperature">
         {formatTemperature(data.current.temp, unit)}
       </div>
       <div className="weather-text">
         <div className="weather-condition">{condition.label}</div>
-        <div className="weather-feels">Feels like {formatTemperature(data.current.feelsLike, unit)}</div>
+        {staleNote ? (
+          <div className="weather-stale" role="status" data-testid="stale-note">
+            {staleNote}
+          </div>
+        ) : (
+          <div className="weather-feels">
+            Feels like {formatTemperature(data.current.feelsLike, unit)}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -62,7 +70,8 @@ function Headline({ data }: { data: Forecast }) {
 
 function Stats({ data }: { data: Forecast }) {
   const { unit, hour12 } = useStore((s) => s.settings);
-  const sunEvent = (value: string | null) => (value ? formatLocalTime(value, hour12) : 'None today');
+  const sunEvent = (value: string | null) =>
+    value ? formatLocalTime(value, hour12) : "None today";
   return (
     <dl className="stats">
       <div>
@@ -88,13 +97,20 @@ function Stats({ data }: { data: Forecast }) {
 function Hourly({ data }: { data: Forecast }) {
   const { unit, hour12 } = useStore((s) => s.settings);
   return (
+    // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users need focus to scroll this strip.
     <ul className="hourly" tabIndex={0} aria-label="Next hours">
       {data.hourly.map((hour) => {
         const condition = describeWeatherCode(hour.code);
         return (
           <li key={hour.time}>
             <span className="hourly-time">{formatLocalHour(hour.time, hour12)}</span>
-            <Icon name={condition.icon} isDay={hour.isDay} className="hourly-icon" />
+            <img
+              className="hourly-icon"
+              src={iconSrc(condition.icon, hour.isDay)}
+              alt={condition.label}
+              width={28}
+              height={28}
+            />
             <span className="hourly-temp">{formatTemperature(hour.temp, unit)}</span>
           </li>
         );
@@ -115,15 +131,31 @@ function Segmented<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="segmented" role="group" aria-label={label}>
+    <fieldset className="segmented">
+      <legend className="sr-only">{label}</legend>
       {options.map(([option, text]) => (
-        <button key={option} type="button" aria-pressed={value === option} onClick={() => onChange(option)}>
+        <button
+          key={option}
+          type="button"
+          aria-pressed={value === option}
+          onClick={() => onChange(option)}
+        >
           {text}
         </button>
       ))}
-    </div>
+    </fieldset>
   );
 }
+
+const TEMPERATURE_OPTIONS = [
+  ["c", "°C"],
+  ["f", "°F"],
+] as const;
+
+const CLOCK_OPTIONS = [
+  ["12", "12h"],
+  ["24", "24h"],
+] as const;
 
 export function InfoPanel() {
   const lat = useStore((s) => s.lat);
@@ -135,28 +167,29 @@ export function InfoPanel() {
   const now = useNow();
   const [expanded, setExpanded] = useState(false);
 
-  // Open water uses the longitude-based zone: the lookup's coarse ocean regions
-  // can land on a distant island's zone, a full calendar day off.
-  const overOcean = place.kind === 'ocean';
-  const estimated = useMemo(
-    () => (overOcean ? nominalZone(lon) : estimateZone(lat, lon)),
-    [lat, lon, overOcean],
-  );
   const data = forecast?.data ?? null;
-  const zone = data?.timezone ?? estimated;
+  const overOcean = place.kind === "ocean";
+  const reportedZone = data?.timezone;
+  const zone = useMemo(
+    () => zoneFor(lat, lon, overOcean, reportedZone),
+    [lat, lon, overOcean, reportedZone],
+  );
 
   const offset = zoneOffsetMinutes(zone, now);
   const viewerOffset = -now.getTimezoneOffset();
   const isDay = data?.current.isDay ?? true;
-  const loading = !moving && (forecast === null || forecast.status === 'loading');
+  const loading = !moving && (forecast === null || forecast.status === "loading");
+  const age = forecast?.fetchedAt != null ? now.getTime() - forecast.fetchedAt : 0;
+  const staleNote =
+    forecast?.status === "error" ? `Couldn't refresh. From ${formatAge(age)}` : null;
 
   return (
-    <aside className={`panel${expanded ? ' is-expanded' : ''}`} aria-label="Selected place">
+    <section className={`panel${expanded ? " is-expanded" : ""}`} aria-label="Selected place">
       <button
         type="button"
         className="panel-handle"
         aria-expanded={expanded}
-        aria-label={expanded ? 'Show less' : 'Show more'}
+        aria-label={expanded ? "Show less" : "Show more"}
         onClick={() => setExpanded((value) => !value)}
       />
 
@@ -179,19 +212,29 @@ export function InfoPanel() {
         </div>
       </section>
 
-      <section className={`weather${isDay ? '' : ' is-night'}`} aria-label="Weather" aria-busy={loading}>
+      <section
+        className={`weather${isDay ? "" : " is-night"}`}
+        aria-label="Weather"
+        aria-busy={loading}
+      >
         {data ? (
-          <div className={forecast?.status === 'loading' ? 'is-refreshing' : undefined}>
-            <Headline data={data} />
+          <div className={forecast?.status === "loading" ? "is-refreshing" : undefined}>
+            <Headline data={data} staleNote={staleNote} />
           </div>
-        ) : forecast?.status === 'error' ? (
+        ) : forecast?.status === "error" ? (
           <div className="weather-empty" role="status" data-testid="weather-error">
             <span>Weather isn't available right now.</span>
-            <button type="button" className="link-button" onClick={retryForecast}>Try again</button>
+            <button type="button" className="link-button" onClick={retryForecast}>
+              Try again
+            </button>
           </div>
         ) : (
           <div className="weather-empty" data-testid="weather-pending">
-            {moving ? 'Stop to see the weather here' : <span className="skeleton">Loading weather…</span>}
+            {moving ? (
+              "Stop to see the weather here"
+            ) : (
+              <span className="skeleton">Loading weather…</span>
+            )}
           </div>
         )}
       </section>
@@ -203,37 +246,36 @@ export function InfoPanel() {
             <Hourly data={data} />
           </>
         )}
-        {forecast?.status === 'error' && data && (
-          <p className="status-line is-warning" role="status" data-testid="stale-note">
-            Couldn't refresh. Showing weather from {formatAge(now.getTime() - (forecast.fetchedAt ?? now.getTime()))}.
-          </p>
-        )}
-        {forecast?.status === 'ready' && forecast.fetchedAt !== null && (
-          <p className="status-line">Updated {formatAge(now.getTime() - forecast.fetchedAt)}</p>
-        )}
+        {forecast?.status === "ready" && <p className="status-line">Updated {formatAge(age)}</p>}
         <div className="settings">
           <Segmented
             label="Temperature unit"
             value={settings.unit}
-            options={[['c', '°C'], ['f', '°F']] as const}
+            options={TEMPERATURE_OPTIONS}
             onChange={(unit) => updateSettings({ unit })}
           />
           <Segmented
             label="Clock format"
-            value={settings.hour12 ? '12' : '24'}
-            options={[['12', '12h'], ['24', '24h']] as const}
-            onChange={(value) => updateSettings({ hour12: value === '12' })}
+            value={settings.hour12 ? "12" : "24"}
+            options={CLOCK_OPTIONS}
+            onChange={(value) => updateSettings({ hour12: value === "12" })}
           />
         </div>
       </div>
 
       <footer className="credits">
-        <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Weather data by Open-Meteo</a>
-        {' · '}
-        <a href="https://www.geonames.org/" target="_blank" rel="noreferrer">GeoNames</a>
-        {' · '}
-        <a href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">Natural Earth</a>
+        <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">
+          Weather data by Open-Meteo
+        </a>
+        {" · "}
+        <a href="https://www.geonames.org/" target="_blank" rel="noreferrer">
+          GeoNames
+        </a>
+        {" · "}
+        <a href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">
+          Natural Earth
+        </a>
       </footer>
-    </aside>
+    </section>
   );
 }

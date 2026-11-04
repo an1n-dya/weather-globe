@@ -1,9 +1,5 @@
-import { Vector3, type PerspectiveCamera } from 'three';
-import { latLonToVec3 } from '../geo/coords';
-import { formatTemperature, type TempUnit } from '../ui/format';
-import { iconSvg } from '../ui/icons';
-import { describeWeatherCode } from '../weather/wmo';
-import type { CityCurrent } from '../weather/provider';
+import { type PerspectiveCamera, Vector3 } from "three";
+import { latLonToVec3 } from "../geo/coords";
 
 export interface MarkerCity {
   name: string;
@@ -13,11 +9,28 @@ export interface MarkerCity {
   pop: number;
 }
 
+export interface MarkerContent {
+  iconSrc: string;
+  temperature: string;
+}
+
+/** left, top, right, bottom, in pixels. */
+type Box = readonly [number, number, number, number];
+
+export interface MarkerLayout {
+  width: number;
+  height: number;
+  /** The part of the screen left free by the panel or sheet. */
+  area: Box;
+  /** Places within that area that markers should stay clear of. */
+  blocked: ReadonlyArray<Box>;
+}
+
 interface Marker {
   city: MarkerCity;
   position: Vector3;
   element: HTMLElement;
-  icon: HTMLElement;
+  icon: HTMLImageElement;
   temp: HTMLElement;
   shown: boolean;
   x: number;
@@ -26,11 +39,21 @@ interface Marker {
 
 /** Below this camera distance, markers also show the city name. */
 const NAMED_DISTANCE = 2.3;
+const TAP_RADIUS_PX = 26;
+
+function createElement<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className: string,
+): HTMLElementTagNameMap[K] {
+  const element = document.createElement(tag);
+  element.className = className;
+  return element;
+}
 
 /**
- * City markers are DOM elements positioned over the canvas: text stays crisp
- * and icons are shared with the panel. They never take pointer events, so a
- * drag that starts on one still turns the globe; taps use `pick` instead.
+ * City markers are DOM elements positioned over the canvas, which keeps text
+ * crisp. They never take pointer events, so a drag that starts on one still
+ * turns the globe; taps use `pick` instead.
  */
 export class CityMarkers {
   private readonly markers: Marker[];
@@ -44,21 +67,15 @@ export class CityMarkers {
     this.markers = [...cities]
       .sort((a, b) => b.pop - a.pop)
       .map((city) => {
-        const element = document.createElement('div');
-        element.className = 'city-marker';
-        const body = document.createElement('div');
-        body.className = 'city-marker-body';
-        const icon = document.createElement('span');
-        icon.className = 'city-marker-icon';
-        const temp = document.createElement('span');
-        temp.className = 'city-marker-temp';
-        const name = document.createElement('span');
-        name.className = 'city-marker-name';
+        const element = createElement("div", "city-marker");
+        const body = createElement("div", "city-marker-body");
+        const icon = createElement("img", "city-marker-icon");
+        icon.alt = "";
+        const temp = createElement("span", "city-marker-temp");
+        const name = createElement("span", "city-marker-name");
         name.textContent = city.name;
         body.append(icon, temp, name);
-        const pin = document.createElement('div');
-        pin.className = 'city-marker-pin';
-        element.append(body, pin);
+        element.append(body, createElement("div", "city-marker-pin"));
         layer.append(element);
         const [x, y, z] = latLonToVec3(city.lat, city.lon);
         return {
@@ -74,39 +91,26 @@ export class CityMarkers {
       });
   }
 
-  setWeather(lookup: (city: MarkerCity) => CityCurrent | null, unit: TempUnit): void {
+  setContent(contentFor: (city: MarkerCity) => MarkerContent | null): void {
     for (const marker of this.markers) {
-      const current = lookup(marker.city);
-      if (!current) {
-        marker.element.classList.remove('has-weather');
-        marker.icon.innerHTML = '';
-        marker.temp.textContent = '';
-        continue;
+      const content = contentFor(marker.city);
+      marker.element.classList.toggle("has-weather", content !== null);
+      marker.temp.textContent = content?.temperature ?? "";
+      // Only when changed, as this runs every minute for every marker.
+      if (content && marker.icon.getAttribute("src") !== content.iconSrc) {
+        marker.icon.src = content.iconSrc;
       }
-      const condition = describeWeatherCode(current.code);
-      marker.element.classList.add('has-weather');
-      marker.icon.innerHTML = iconSvg(condition.icon, current.isDay);
-      marker.temp.textContent = formatTemperature(current.temp, unit);
     }
   }
 
-  update(
-    camera: PerspectiveCamera,
-    width: number,
-    height: number,
-    center: { x: number; y: number },
-    insets: { top: number; right: number; bottom: number },
-  ): void {
+  update(camera: PerspectiveCamera, { width, height, area, blocked }: MarkerLayout): void {
     const distance = camera.position.length();
     const named = distance < NAMED_DISTANCE;
-    this.layer.classList.toggle('is-named', named);
+    this.layer.classList.toggle("is-named", named);
     const halfW = named ? 52 : 30;
     const boxH = named ? 46 : 34;
 
-    // The reticle area is reserved so it stays readable.
-    const taken: Array<[number, number, number, number]> = [
-      [center.x - 36, center.y - 36, center.x + 36, center.y + 36],
-    ];
+    const taken: Box[] = [...blocked];
     const horizon = 1 / distance + 0.04;
     const cameraDir = camera.position.clone().normalize();
 
@@ -116,24 +120,27 @@ export class CityMarkers {
         const projected = this.scratch.copy(marker.position).project(camera);
         const x = ((projected.x + 1) / 2) * width;
         const y = ((1 - projected.y) / 2) * height;
-        const box: [number, number, number, number] = [x - halfW, y - boxH - 6, x + halfW, y];
-        // Only where it fits whole, clear of the panel and the screen edges.
+        // Follows the globe even when hidden, so a marker fading out doesn't lag behind.
+        marker.x = x;
+        marker.y = y;
+        marker.element.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
+
+        const left = x - halfW;
+        const right = x + halfW;
+        const top = y - boxH - 6;
+        const bottom = y;
+        // Only where it fits whole, clear of everything else.
         show =
-          box[0] >= 0 &&
-          box[2] <= width - insets.right &&
-          box[1] >= insets.top &&
-          box[3] <= height - insets.bottom &&
-          !taken.some((t) => box[0] < t[2] && box[2] > t[0] && box[1] < t[3] && box[3] > t[1]);
-        if (show) {
-          taken.push(box);
-          marker.x = x;
-          marker.y = y;
-          marker.element.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
-        }
+          left >= area[0] &&
+          top >= area[1] &&
+          right <= area[2] &&
+          bottom <= area[3] &&
+          !taken.some((t) => left < t[2] && right > t[0] && top < t[3] && bottom > t[1]);
+        if (show) taken.push([left, top, right, bottom]);
       }
       if (show !== marker.shown) {
         marker.shown = show;
-        marker.element.classList.toggle('is-shown', show);
+        marker.element.classList.toggle("is-shown", show);
       }
     }
   }
@@ -141,7 +148,7 @@ export class CityMarkers {
   /** The visible marker within reach of a tap, if any. */
   pick(x: number, y: number): MarkerCity | null {
     let best: MarkerCity | null = null;
-    let bestDistance = 26;
+    let bestDistance = TAP_RADIUS_PX;
     for (const marker of this.markers) {
       if (!marker.shown) continue;
       // Measured to the middle of the marker, which sits above its anchor.

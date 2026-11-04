@@ -1,4 +1,8 @@
-import { DEG, latLonToVec3, normalizeLon, type Vec3 } from './coords';
+import { DEG, latLonToVec3, normalizeLon, type Vec3 } from "./coords";
+
+const MS_PER_DAY = 86_400_000;
+/** Where the sun's center sits at sunrise and sunset, once refraction is counted. */
+const HORIZON_DEG = -0.83;
 
 /**
  * The point on Earth with the sun directly overhead. Uses the low-precision
@@ -6,7 +10,7 @@ import { DEG, latLonToVec3, normalizeLon, type Vec3 } from './coords';
  * fraction of a degree, which is far more than a stylized terminator needs.
  */
 export function subsolarPoint(date: Date): { lat: number; lon: number } {
-  const days = date.getTime() / 86_400_000 + 2440587.5 - 2451545;
+  const days = date.getTime() / MS_PER_DAY + 2440587.5 - 2451545;
 
   const meanAnomaly = (357.529 + 0.98560028 * days) * DEG;
   const meanLongitudeDeg = 280.459 + 0.98564736 * days;
@@ -22,7 +26,8 @@ export function subsolarPoint(date: Date): { lat: number; lon: number } {
 
   // Equation of time in degrees: how far the true sun leads the mean sun.
   const equationOfTimeDeg = normalizeLon(meanLongitudeDeg - rightAscension / DEG);
-  const utcHours = ((date.getTime() % 86_400_000) + 86_400_000) % 86_400_000 / 3_600_000;
+  const msIntoDay = ((date.getTime() % MS_PER_DAY) + MS_PER_DAY) % MS_PER_DAY;
+  const utcHours = msIntoDay / 3_600_000;
   const lon = normalizeLon(-15 * (utcHours - 12) - equationOfTimeDeg);
 
   return { lat: declination / DEG, lon };
@@ -31,4 +36,15 @@ export function subsolarPoint(date: Date): { lat: number; lon: number } {
 export function sunDirection(date: Date): Vec3 {
   const { lat, lon } = subsolarPoint(date);
   return latLonToVec3(lat, lon);
+}
+
+/** The sun's height above the horizon at a place, in degrees. */
+export function sunAltitudeDeg(lat: number, lon: number, date: Date): number {
+  const sun = sunDirection(date);
+  const [x, y, z] = latLonToVec3(lat, lon);
+  return Math.asin(x * sun[0] + y * sun[1] + z * sun[2]) / DEG;
+}
+
+export function isSunUp(lat: number, lon: number, date: Date): boolean {
+  return sunAltitudeDeg(lat, lon, date) > HORIZON_DEG;
 }

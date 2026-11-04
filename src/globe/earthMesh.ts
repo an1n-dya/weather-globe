@@ -1,17 +1,17 @@
-import { vec3ToLatLon } from '../geo/coords';
-import { buildIcosphere, faceCount } from './icosphere';
+import { vec3ToLatLon } from "../geo/coords";
+import { buildIcosphere, faceCount } from "./icosphere";
 
 export interface EarthArrays {
   /** Flat-shaded, non-indexed triangles: three corners per face. */
-  positions: Float32Array;
-  normals: Float32Array;
-  colors: Uint8Array;
+  positions: Float32Array<ArrayBuffer>;
+  normals: Float32Array<ArrayBuffer>;
+  colors: Uint8Array<ArrayBuffer>;
 }
 
 type Rgb = readonly [number, number, number];
 
 const OCEAN_DEEP: Rgb = [0.17, 0.45, 0.68];
-const OCEAN_MID: Rgb = [0.21, 0.52, 0.74];
+export const OCEAN_MID: Rgb = [0.21, 0.52, 0.74];
 const OCEAN_SHALLOW: Rgb = [0.33, 0.68, 0.78];
 const SEA_ICE: Rgb = [0.78, 0.88, 0.93];
 const ICE: Rgb = [0.93, 0.96, 0.97];
@@ -27,16 +27,22 @@ function hash3(x: number, y: number, z: number): number {
   return h - Math.floor(h);
 }
 
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function fade(t: number): number {
+  return t * t * (3 - 2 * t);
+}
+
 /** Smooth 3D value noise in [0, 1]. */
 function noise3(x: number, y: number, z: number): number {
   const xi = Math.floor(x);
   const yi = Math.floor(y);
   const zi = Math.floor(z);
-  const fade = (t: number) => t * t * (3 - 2 * t);
   const u = fade(x - xi);
   const v = fade(y - yi);
   const w = fade(z - zi);
-  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
   return lerp(
     lerp(
       lerp(hash3(xi, yi, zi), hash3(xi + 1, yi, zi), u),
@@ -97,9 +103,9 @@ function oceanColor(lat: number, n: number, shallow: boolean): Rgb {
   // A gradual blend: a hard threshold here reads as camouflage patches.
   const t = Math.max(0, Math.min(1, (n - 0.35) / 0.3));
   return [
-    OCEAN_DEEP[0] + (OCEAN_MID[0] - OCEAN_DEEP[0]) * t,
-    OCEAN_DEEP[1] + (OCEAN_MID[1] - OCEAN_DEEP[1]) * t,
-    OCEAN_DEEP[2] + (OCEAN_MID[2] - OCEAN_DEEP[2]) * t,
+    lerp(OCEAN_DEEP[0], OCEAN_MID[0], t),
+    lerp(OCEAN_DEEP[1], OCEAN_MID[1], t),
+    lerp(OCEAN_DEEP[2], OCEAN_MID[2], t),
   ];
 }
 
@@ -111,7 +117,7 @@ export function buildEarthArrays(frequency: number, mask: Uint8Array): EarthArra
 
   const { vertices, faces } = buildIcosphere(frequency);
   const vertexTotal = vertices.length / 3;
-  const isLandFace = (f: number) => (mask[f >> 3] & (1 << (f & 7))) !== 0;
+  const isLandFace = (f: number) => (mask[f >> 3]! & (1 << (f & 7))) !== 0;
 
   // A vertex is coastal if only some of the faces around it are land.
   const landTouches = new Uint8Array(vertexTotal);
@@ -119,9 +125,9 @@ export function buildEarthArrays(frequency: number, mask: Uint8Array): EarthArra
   for (let f = 0; f < faceTotal; f++) {
     const land = isLandFace(f);
     for (let c = 0; c < 3; c++) {
-      const v = faces[f * 3 + c];
-      allTouches[v]++;
-      if (land) landTouches[v]++;
+      const v = faces[f * 3 + c]!;
+      allTouches[v]!++;
+      if (land) landTouches[v]!++;
     }
   }
 
@@ -129,14 +135,15 @@ export function buildEarthArrays(frequency: number, mask: Uint8Array): EarthArra
   for (let v = 0; v < vertexTotal; v++) {
     if (landTouches[v] === 0) {
       radii[v] = 1;
-    } else if (landTouches[v] < allTouches[v]) {
+    } else if (landTouches[v]! < allTouches[v]!) {
       radii[v] = 1.005;
     } else {
-      const x = vertices[v * 3];
-      const y = vertices[v * 3 + 1];
-      const z = vertices[v * 3 + 2];
-      const n = fractalNoise(x + 11, y + 5, z + 3);
-      radii[v] = 1.009 + Math.pow(Math.max(0, n - 0.42), 1.5) * 0.08;
+      const n = fractalNoise(
+        vertices[v * 3]! + 11,
+        vertices[v * 3 + 1]! + 5,
+        vertices[v * 3 + 2]! + 3,
+      );
+      radii[v] = 1.009 + Math.max(0, n - 0.42) ** 1.5 * 0.08;
     }
   }
 
@@ -145,59 +152,67 @@ export function buildEarthArrays(frequency: number, mask: Uint8Array): EarthArra
   const colors = new Uint8Array(faceTotal * 9);
 
   for (let f = 0; f < faceTotal; f++) {
-    const ia = faces[f * 3];
-    const ib = faces[f * 3 + 1];
-    const ic = faces[f * 3 + 2];
+    const offset = f * 9;
 
-    const corner = (v: number) => {
-      const r = radii[v];
-      return [vertices[v * 3] * r, vertices[v * 3 + 1] * r, vertices[v * 3 + 2] * r];
-    };
-    const a = corner(ia);
-    const b = corner(ib);
-    const c = corner(ic);
+    // Scale the three corners out to their radii.
+    for (let c = 0; c < 3; c++) {
+      const v = faces[f * 3 + c]!;
+      const r = radii[v]!;
+      positions[offset + c * 3] = vertices[v * 3]! * r;
+      positions[offset + c * 3 + 1] = vertices[v * 3 + 1]! * r;
+      positions[offset + c * 3 + 2] = vertices[v * 3 + 2]! * r;
+    }
+    const ax = positions[offset]!;
+    const ay = positions[offset + 1]!;
+    const az = positions[offset + 2]!;
+    const bx = positions[offset + 3]!;
+    const by = positions[offset + 4]!;
+    const bz = positions[offset + 5]!;
+    const cx = positions[offset + 6]!;
+    const cy = positions[offset + 7]!;
+    const cz = positions[offset + 8]!;
 
-    const ux = b[0] - a[0];
-    const uy = b[1] - a[1];
-    const uz = b[2] - a[2];
-    const vx = c[0] - a[0];
-    const vy = c[1] - a[1];
-    const vz = c[2] - a[2];
-    let nx = uy * vz - uz * vy;
-    let ny = uz * vx - ux * vz;
-    let nz = ux * vy - uy * vx;
-    const nLength = Math.hypot(nx, ny, nz) || 1;
-    nx /= nLength;
-    ny /= nLength;
-    nz /= nLength;
+    // The face normal, from the cross product of two edges.
+    const ux = bx - ax;
+    const uy = by - ay;
+    const uz = bz - az;
+    const vx = cx - ax;
+    const vy = cy - ay;
+    const vz = cz - az;
+    const crossX = uy * vz - uz * vy;
+    const crossY = uz * vx - ux * vz;
+    const crossZ = ux * vy - uy * vx;
+    const crossLength = Math.hypot(crossX, crossY, crossZ) || 1;
+    const nx = crossX / crossLength;
+    const ny = crossY / crossLength;
+    const nz = crossZ / crossLength;
 
-    const cx = (a[0] + b[0] + c[0]) / 3;
-    const cy = (a[1] + b[1] + c[1]) / 3;
-    const cz = (a[2] + b[2] + c[2]) / 3;
-    const { lat, lon } = vec3ToLatLon(cx, cy, cz);
-    const n = fractalNoise(cx * 1.4 + 2, cy * 1.4 + 7, cz * 1.4 + 13);
+    const midX = (ax + bx + cx) / 3;
+    const midY = (ay + by + cy) / 3;
+    const midZ = (az + bz + cz) / 3;
+    const { lat, lon } = vec3ToLatLon(midX, midY, midZ);
+    const n = fractalNoise(midX * 1.4 + 2, midY * 1.4 + 7, midZ * 1.4 + 13);
 
     const land = isLandFace(f);
-    const shallow = landTouches[ia] > 0 || landTouches[ib] > 0 || landTouches[ic] > 0;
+    const shallow =
+      landTouches[faces[f * 3]!]! > 0 ||
+      landTouches[faces[f * 3 + 1]!]! > 0 ||
+      landTouches[faces[f * 3 + 2]!]! > 0;
     const base = land ? landColor(lat, lon, n) : oceanColor(lat, n, shallow);
     // Small per-face variation is what makes the facets read.
-    const jitter = (land ? 0.93 : 0.97) + hash3(cx * 91, cy * 91, cz * 91) * (land ? 0.14 : 0.06);
+    const jitter =
+      (land ? 0.93 : 0.97) + hash3(midX * 91, midY * 91, midZ * 91) * (land ? 0.14 : 0.06);
     const red = Math.min(255, base[0] * jitter * 255);
     const green = Math.min(255, base[1] * jitter * 255);
     const blue = Math.min(255, base[2] * jitter * 255);
 
-    const offset = f * 9;
-    const tri = [a, b, c];
-    for (let k = 0; k < 3; k++) {
-      positions[offset + k * 3] = tri[k][0];
-      positions[offset + k * 3 + 1] = tri[k][1];
-      positions[offset + k * 3 + 2] = tri[k][2];
-      normals[offset + k * 3] = nx;
-      normals[offset + k * 3 + 1] = ny;
-      normals[offset + k * 3 + 2] = nz;
-      colors[offset + k * 3] = red;
-      colors[offset + k * 3 + 1] = green;
-      colors[offset + k * 3 + 2] = blue;
+    for (let c = 0; c < 3; c++) {
+      normals[offset + c * 3] = nx;
+      normals[offset + c * 3 + 1] = ny;
+      normals[offset + c * 3 + 2] = nz;
+      colors[offset + c * 3] = red;
+      colors[offset + c * 3 + 1] = green;
+      colors[offset + c * 3 + 2] = blue;
     }
   }
 

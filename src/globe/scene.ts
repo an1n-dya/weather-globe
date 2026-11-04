@@ -3,8 +3,8 @@ import {
   BackSide,
   BufferAttribute,
   BufferGeometry,
+  type Material,
   Mesh,
-  MeshBasicMaterial,
   PerspectiveCamera,
   Points,
   Raycaster,
@@ -14,12 +14,15 @@ import {
   Vector2,
   Vector3,
   WebGLRenderer,
-} from 'three';
-import { latLonToVec3, vec3ToLatLon } from '../geo/coords';
-import { sunDirection } from '../geo/sun';
-import { dataUrl } from '../data';
-import { fitDistance, FOV, GlobeCameraRig, type GlobeView } from './camera';
-import { buildEarthArrays } from './earthMesh';
+} from "three";
+import { dataUrl } from "../data";
+import { latLonToVec3, vec3ToLatLon } from "../geo/coords";
+import { sunDirection } from "../geo/sun";
+import { FOV, fitDistance, GlobeCameraRig, type GlobeView } from "./camera";
+import { buildEarthArrays, type EarthArrays, OCEAN_MID } from "./earthMesh";
+import type { EarthRequest } from "./earthWorker";
+import { FREQUENCY_HIGH, FREQUENCY_LOW } from "./icosphere";
+import { CityMarkers, type MarkerCity, type MarkerContent, type MarkerLayout } from "./markers";
 import {
   atmosphereFragment,
   atmosphereVertex,
@@ -29,9 +32,7 @@ import {
   lightsVertex,
   starsFragment,
   starsVertex,
-} from './earth.shaders';
-import { FREQUENCY_HIGH, FREQUENCY_LOW } from './icosphere';
-import { CityMarkers, type MarkerCity } from './markers';
+} from "./shaders";
 
 export interface GlobeCallbacks {
   onMove(view: GlobeView): void;
@@ -46,6 +47,17 @@ export interface Insets {
   bottom: number;
 }
 
+export interface GlobeSceneOptions {
+  container: HTMLElement;
+  markerLayer: HTMLElement;
+  cities: ReadonlyArray<MarkerCity>;
+  initial: { lat: number; lon: number; distance?: number };
+  insets: Insets;
+  callbacks: GlobeCallbacks;
+  /** Interface elements floating over the globe, which markers should stay clear of. */
+  obstacles: () => Element[];
+}
+
 export interface LightPoint {
   lat: number;
   lon: number;
@@ -55,76 +67,106 @@ export interface LightPoint {
 const SETTLE_MS = 400;
 const SUN_REFRESH_MS = 30_000;
 const LIGHT_RADIUS = 1.036;
+const TAP_MAX_TRAVEL_PX = 6;
+const TAP_MAX_MS = 400;
+const ZOOM_IN_FACTOR = 0.72;
+const ZOOM_OUT_FACTOR = 1.38;
+const RETICLE_CLEARANCE_PX = 36;
 
 function prefersLowDetail(): boolean {
-  const forced = new URLSearchParams(location.search).get('detail');
-  if (forced) return forced === 'low';
+  const forced = new URLSearchParams(location.search).get("detail");
+  if (forced) return forced === "low";
   const nav = navigator as Navigator & { deviceMemory?: number };
-  const coarse = matchMedia('(pointer: coarse)').matches;
+  const coarse = matchMedia("(pointer: coarse)").matches;
   return coarse && (navigator.hardwareConcurrency <= 4 || (nav.deviceMemory ?? 8) <= 3);
 }
 
-export class GlobeScene {
-  /** Screen position of the globe center, where the reticle belongs. */
-  center = { x: 0, y: 0 };
+function buildEarthInWorker(request: EarthRequest): Promise<EarthArrays> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./earthWorker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = ({ data }: MessageEvent<EarthArrays>) => {
+      resolve(data);
+      worker.terminate();
+    };
+    worker.onerror = (event) => {
+      reject(new Error(event.message));
+      worker.terminate();
+    };
+    worker.postMessage(request);
+  });
+}
 
+export class GlobeScene {
+  private readonly container: HTMLElement;
+  private readonly initial: GlobeSceneOptions["initial"];
+  private readonly callbacks: GlobeCallbacks;
+  private readonly obstacles: () => Element[];
+  private insets: Insets;
   private readonly renderer: WebGLRenderer;
   private readonly scene = new Scene();
   private readonly camera: PerspectiveCamera;
   private readonly rig: GlobeCameraRig;
+  private readonly markers: CityMarkers;
   private readonly sunUniform = { value: new Vector3(0, 0, 1) };
   private readonly lightScale = { value: 1 };
   private readonly raycaster = new Raycaster();
   private readonly lowDetail = prefersLowDetail();
   private readonly pixelRatio: number;
-  private markers: CityMarkers | null = null;
+  private readonly resizeObserver: ResizeObserver;
   private frame = 0;
   private disposed = false;
   private dirty = true;
   private positioned = false;
-  private lastPosition = new Vector3();
-  private lastMoveAt = 0;
+  private readonly lastPosition = new Vector3();
+  private lastMoveAt = Number.NEGATIVE_INFINITY;
   private settled = false;
-  private lastSunAt = -Infinity;
+  private lastSunAt = Number.NEGATIVE_INFINITY;
   private width = 1;
   private height = 1;
-  private insets: Insets = { top: 0, right: 0, bottom: 0 };
-  private pointerDown: { x: number; y: number; time: number } | null = null;
+  private markerLayout: MarkerLayout = { width: 1, height: 1, area: [0, 0, 1, 1], blocked: [] };
+  private tapStart: { x: number; y: number; time: number; pointerId: number } | null = null;
   private lights: Points | null = null;
   private placeholder: Mesh | null = null;
-  private readonly resizeObserver: ResizeObserver;
 
   /** Throws if WebGL is unavailable, so callers can fall back to the panel alone. */
-  constructor(
-    private readonly container: HTMLElement,
-    markerLayer: HTMLElement,
-    cities: ReadonlyArray<MarkerCity>,
-    private readonly initial: { lat: number; lon: number; distance?: number },
-    insets: Insets,
-    private readonly callbacks: GlobeCallbacks,
-  ) {
-    this.insets = insets;
-    this.renderer = new WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+  constructor(options: GlobeSceneOptions) {
+    this.container = options.container;
+    this.initial = options.initial;
+    this.insets = options.insets;
+    this.callbacks = options.callbacks;
+    this.obstacles = options.obstacles;
+
+    this.renderer = new WebGLRenderer({ antialias: true, alpha: true });
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, this.lowDetail ? 1.5 : 2);
     this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setClearColor(0x000000, 0);
-    container.append(this.renderer.domElement);
+
+    const dom = this.renderer.domElement;
+    dom.tabIndex = 0;
+    dom.setAttribute("role", "application");
+    dom.setAttribute(
+      "aria-label",
+      "Globe. Use the arrow keys to rotate and plus or minus to zoom.",
+    );
+    this.container.append(dom);
 
     this.camera = new PerspectiveCamera(FOV, 1, 0.02, 60);
-    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    this.rig = new GlobeCameraRig(this.camera, this.renderer.domElement, reducedMotion);
-    this.markers = new CityMarkers(markerLayer, cities);
+    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    this.rig = new GlobeCameraRig(this.camera, dom, reducedMotion);
+    this.markers = new CityMarkers(options.markerLayer, options.cities);
 
     this.addPlaceholder();
     this.addAtmosphere();
     this.addStars();
     void this.loadEarth();
 
-    const dom = this.renderer.domElement;
-    dom.addEventListener('pointerdown', this.handlePointerDown);
-    dom.addEventListener('pointerup', this.handlePointerUp);
+    dom.addEventListener("pointerdown", this.handlePointerDown);
+    dom.addEventListener("pointerup", this.handlePointerUp);
+    dom.addEventListener("pointercancel", this.handlePointerCancel);
+    dom.addEventListener("keydown", this.handleKeyDown);
+    dom.addEventListener("webglcontextrestored", this.handleContextRestored);
     this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe(container);
+    this.resizeObserver.observe(this.container);
     this.resize();
     this.frame = requestAnimationFrame(this.tick);
   }
@@ -138,10 +180,6 @@ export class GlobeScene {
     this.rig.flyTo({ lat, lon, distance }, performance.now());
   }
 
-  nudge(dLat: number, dLon: number): void {
-    this.rig.nudge(dLat, dLon, performance.now());
-  }
-
   zoomBy(factor: number): void {
     this.rig.zoomBy(factor, performance.now());
   }
@@ -151,22 +189,23 @@ export class GlobeScene {
     this.resize();
   }
 
-  setCityWeather(...args: Parameters<CityMarkers['setWeather']>): void {
-    this.markers?.setWeather(...args);
+  setCityWeather(contentFor: (city: MarkerCity) => MarkerContent | null): void {
+    this.markers.setContent(contentFor);
     this.dirty = true;
   }
 
   setLights(points: ReadonlyArray<LightPoint>): void {
+    if (this.lights) this.removeObject(this.lights);
+
     const positions = new Float32Array(points.length * 3);
     const sizes = new Float32Array(points.length);
-    points.forEach((p, i) => {
-      const [x, y, z] = latLonToVec3(p.lat, p.lon, LIGHT_RADIUS);
-      positions.set([x, y, z], i * 3);
-      sizes[i] = Math.min(4.2, 0.9 + Math.max(0, Math.log10(p.pop) - 4.2) * 1.2);
+    points.forEach((point, i) => {
+      positions.set(latLonToVec3(point.lat, point.lon, LIGHT_RADIUS), i * 3);
+      sizes[i] = Math.min(4.2, 0.9 + Math.max(0, Math.log10(point.pop) - 4.2) * 1.2);
     });
     const geometry = new BufferGeometry();
-    geometry.setAttribute('position', new BufferAttribute(positions, 3));
-    geometry.setAttribute('aSize', new BufferAttribute(sizes, 1));
+    geometry.setAttribute("position", new BufferAttribute(positions, 3));
+    geometry.setAttribute("aSize", new BufferAttribute(sizes, 1));
     const material = new ShaderMaterial({
       vertexShader: lightsVertex,
       fragmentShader: lightsFragment,
@@ -185,25 +224,39 @@ export class GlobeScene {
     cancelAnimationFrame(this.frame);
     this.resizeObserver.disconnect();
     const dom = this.renderer.domElement;
-    dom.removeEventListener('pointerdown', this.handlePointerDown);
-    dom.removeEventListener('pointerup', this.handlePointerUp);
+    dom.removeEventListener("pointerdown", this.handlePointerDown);
+    dom.removeEventListener("pointerup", this.handlePointerUp);
+    dom.removeEventListener("pointercancel", this.handlePointerCancel);
+    dom.removeEventListener("keydown", this.handleKeyDown);
+    dom.removeEventListener("webglcontextrestored", this.handleContextRestored);
     this.rig.dispose();
-    this.markers?.dispose();
-    this.scene.traverse((object) => {
-      const item = object as Mesh;
-      item.geometry?.dispose();
-      const material = item.material as ShaderMaterial | undefined;
-      material?.dispose?.();
-    });
+    this.markers.dispose();
+    for (const object of [...this.scene.children]) this.removeObject(object as Mesh | Points);
     this.renderer.dispose();
     dom.remove();
   }
 
+  private removeObject(object: Mesh | Points): void {
+    this.scene.remove(object);
+    object.geometry.dispose();
+    (object.material as Material).dispose();
+  }
+
+  private createEarthMaterial(): ShaderMaterial {
+    return new ShaderMaterial({
+      vertexShader: earthVertex,
+      fragmentShader: earthFragment,
+      uniforms: { uSun: this.sunUniform },
+    });
+  }
+
+  /** Plain ocean under the same lighting, so the continents simply appear once they're ready. */
   private addPlaceholder(): void {
-    this.placeholder = new Mesh(
-      new SphereGeometry(1, 48, 32),
-      new MeshBasicMaterial({ color: 0x24527a }),
-    );
+    const geometry = new SphereGeometry(1, 64, 48);
+    const colors = new Float32Array(geometry.getAttribute("position").count * 3);
+    for (let i = 0; i < colors.length; i += 3) colors.set(OCEAN_MID, i);
+    geometry.setAttribute("aColor", new BufferAttribute(colors, 3));
+    this.placeholder = new Mesh(geometry, this.createEarthMaterial());
     this.scene.add(this.placeholder);
   }
 
@@ -238,8 +291,8 @@ export class GlobeScene {
       sizes[i] = 0.7 + random() * random() * 2;
     }
     const geometry = new BufferGeometry();
-    geometry.setAttribute('position', new BufferAttribute(positions, 3));
-    geometry.setAttribute('aSize', new BufferAttribute(sizes, 1));
+    geometry.setAttribute("position", new BufferAttribute(positions, 3));
+    geometry.setAttribute("aSize", new BufferAttribute(sizes, 1));
     const material = new ShaderMaterial({
       vertexShader: starsVertex,
       fragmentShader: starsFragment,
@@ -258,28 +311,25 @@ export class GlobeScene {
       const mask = new Uint8Array(await response.arrayBuffer());
       if (this.disposed) return;
 
-      const { positions, normals, colors } = buildEarthArrays(frequency, mask);
+      const { positions, normals, colors } = await buildEarthInWorker({ frequency, mask }).catch(
+        () => buildEarthArrays(frequency, mask),
+      );
+      if (this.disposed) return;
+
       const geometry = new BufferGeometry();
-      geometry.setAttribute('position', new BufferAttribute(positions, 3));
-      geometry.setAttribute('normal', new BufferAttribute(normals, 3));
-      geometry.setAttribute('aColor', new BufferAttribute(colors, 3, true));
-      const material = new ShaderMaterial({
-        vertexShader: earthVertex,
-        fragmentShader: earthFragment,
-        uniforms: { uSun: this.sunUniform },
-      });
-      this.scene.add(new Mesh(geometry, material));
+      geometry.setAttribute("position", new BufferAttribute(positions, 3));
+      geometry.setAttribute("normal", new BufferAttribute(normals, 3));
+      geometry.setAttribute("aColor", new BufferAttribute(colors, 3, true));
+      this.scene.add(new Mesh(geometry, this.createEarthMaterial()));
 
       if (this.placeholder) {
-        this.scene.remove(this.placeholder);
-        this.placeholder.geometry.dispose();
-        (this.placeholder.material as MeshBasicMaterial).dispose();
+        this.removeObject(this.placeholder);
         this.placeholder = null;
       }
       this.dirty = true;
     } catch (error) {
       // The plain sphere stays visible; time and weather are unaffected.
-      console.warn('Could not load land data', error);
+      console.warn("Could not load land data", error);
     }
   }
 
@@ -298,11 +348,35 @@ export class GlobeScene {
     const offsetY = (bottom - top) / 2;
     this.camera.aspect = width / height;
     this.camera.setViewOffset(width, height, offsetX, offsetY, width, height);
-    this.camera.updateProjectionMatrix();
 
-    this.center = { x: width / 2 - offsetX, y: height / 2 - offsetY };
-    this.container.style.setProperty('--globe-x', `${this.center.x}px`);
-    this.container.style.setProperty('--globe-y', `${this.center.y}px`);
+    const centerX = width / 2 - offsetX;
+    const centerY = height / 2 - offsetY;
+    this.container.style.setProperty("--globe-x", `${centerX}px`);
+    this.container.style.setProperty("--globe-y", `${centerY}px`);
+
+    const origin = this.container.getBoundingClientRect();
+    this.markerLayout = {
+      width,
+      height,
+      area: [0, top, width - right, height - bottom],
+      blocked: [
+        [
+          centerX - RETICLE_CLEARANCE_PX,
+          centerY - RETICLE_CLEARANCE_PX,
+          centerX + RETICLE_CLEARANCE_PX,
+          centerY + RETICLE_CLEARANCE_PX,
+        ],
+        ...this.obstacles().map((element) => {
+          const rect = element.getBoundingClientRect();
+          return [
+            rect.left - origin.left,
+            rect.top - origin.top,
+            rect.right - origin.left,
+            rect.bottom - origin.top,
+          ] as const;
+        }),
+      ],
+    };
 
     const fit = fitDistance(Math.min(freeWidth, freeHeight), height);
     this.rig.setMaxDistance(fit * 1.04);
@@ -314,8 +388,10 @@ export class GlobeScene {
       this.rig.jumpTo({
         lat: this.initial.lat,
         lon: this.initial.lon,
-        distance: Math.min(this.initial.distance ?? Infinity, this.rig.maxDistance),
+        distance: Math.min(this.initial.distance ?? Number.POSITIVE_INFINITY, this.rig.maxDistance),
       });
+      // Arriving here isn't a move, so the first frame settles straight away.
+      this.lastPosition.copy(this.camera.position);
     }
     this.dirty = true;
   }
@@ -327,8 +403,7 @@ export class GlobeScene {
 
     if (now - this.lastSunAt > SUN_REFRESH_MS) {
       this.lastSunAt = now;
-      const [x, y, z] = sunDirection(new Date());
-      this.sunUniform.value.set(x, y, z);
+      this.sunUniform.value.set(...sunDirection(new Date()));
       this.dirty = true;
     }
 
@@ -349,27 +424,75 @@ export class GlobeScene {
       this.dirty = false;
       const altitude = this.camera.position.length() - 1;
       this.lightScale.value = this.pixelRatio * Math.min(2.4, 0.75 + 0.55 / altitude);
-      this.markers?.update(this.camera, this.width, this.height, this.center, this.insets);
+      this.markers.update(this.camera, this.markerLayout);
       this.renderer.render(this.scene, this.camera);
     }
   };
 
+  /** Phones can drop the GPU context in the background; a restored canvas starts out blank. */
+  private handleContextRestored = (): void => {
+    this.dirty = true;
+  };
+
+  private handleKeyDown = (event: KeyboardEvent): void => {
+    // Leaves browser shortcuts alone, such as Ctrl+minus and Alt+Left.
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const now = performance.now();
+    switch (event.key) {
+      case "ArrowUp":
+        this.rig.nudge(1, 0, now);
+        break;
+      case "ArrowDown":
+        this.rig.nudge(-1, 0, now);
+        break;
+      case "ArrowLeft":
+        this.rig.nudge(0, -1, now);
+        break;
+      case "ArrowRight":
+        this.rig.nudge(0, 1, now);
+        break;
+      case "+":
+      case "=":
+        this.rig.zoomBy(ZOOM_IN_FACTOR, now);
+        break;
+      case "-":
+        this.rig.zoomBy(ZOOM_OUT_FACTOR, now);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  };
+
   private handlePointerDown = (event: PointerEvent): void => {
-    this.pointerDown = { x: event.clientX, y: event.clientY, time: performance.now() };
+    // A second finger is a pinch, and other mouse buttons aren't taps.
+    this.tapStart =
+      event.isPrimary && event.button === 0
+        ? {
+            x: event.clientX,
+            y: event.clientY,
+            time: performance.now(),
+            pointerId: event.pointerId,
+          }
+        : null;
+  };
+
+  private handlePointerCancel = (): void => {
+    this.tapStart = null;
   };
 
   private handlePointerUp = (event: PointerEvent): void => {
-    const start = this.pointerDown;
-    this.pointerDown = null;
-    if (!start) return;
+    const start = this.tapStart;
+    this.tapStart = null;
+    if (start?.pointerId !== event.pointerId) return;
     const travel = Math.hypot(event.clientX - start.x, event.clientY - start.y);
-    if (travel > 6 || performance.now() - start.time > 400) return;
+    if (travel > TAP_MAX_TRAVEL_PX || performance.now() - start.time > TAP_MAX_MS) return;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
 
-    const city = this.markers?.pick(x, y);
+    const city = this.markers.pick(x, y);
     if (city) {
       this.callbacks.onTapCity(city);
       return;

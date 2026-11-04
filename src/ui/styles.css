@@ -9,14 +9,23 @@
   --accent: #ffc94d;
   --warning: #ffb86b;
   --radius: 18px;
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color: var(--text);
   color-scheme: dark;
 }
 
-*, *::before, *::after { box-sizing: border-box; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
 
-html, body, #root { height: 100%; margin: 0; }
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
 
 body {
   overflow: hidden;
@@ -24,9 +33,16 @@ body {
   overscroll-behavior: none;
 }
 
-button { font: inherit; color: inherit; cursor: pointer; }
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
 
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .sr-only {
   position: absolute;
@@ -37,16 +53,24 @@ button { font: inherit; color: inherit; cursor: pointer; }
   white-space: nowrap;
 }
 
-.app { position: fixed; inset: 0; }
+.app {
+  position: fixed;
+  inset: 0;
+}
 
 .stage {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  background: radial-gradient(circle at var(--globe-x, 50%) var(--globe-y, 50%), var(--bg-glow) 0%, var(--bg) 62%);
+  /* Until the globe loads and takes over these values. Matches the insets in App.tsx. */
+  --globe-x: calc(50% - 192px);
+  --globe-y: 50%;
+  background: radial-gradient(
+    circle at var(--globe-x) var(--globe-y),
+    var(--bg-glow) 0%,
+    var(--bg) 62%
+  );
 }
-
-.stage:focus-visible { outline-offset: -4px; }
 
 .stage canvas {
   display: block;
@@ -54,13 +78,18 @@ button { font: inherit; color: inherit; cursor: pointer; }
   touch-action: none;
 }
 
-.stage canvas:active { cursor: grabbing; }
+.stage canvas:active {
+  cursor: grabbing;
+}
+.stage canvas:focus-visible {
+  outline-offset: -4px;
+}
 
 /* Reticle */
 .reticle {
   position: absolute;
-  left: var(--globe-x, 50%);
-  top: var(--globe-y, 50%);
+  left: var(--globe-x);
+  top: var(--globe-y);
   width: 48px;
   height: 48px;
   transform: translate(-50%, -50%);
@@ -68,14 +97,33 @@ button { font: inherit; color: inherit; cursor: pointer; }
   transition: transform 180ms ease;
 }
 
-.reticle.is-moving { transform: translate(-50%, -50%) scale(0.86); }
+.reticle.is-moving {
+  transform: translate(-50%, -50%) scale(0.86);
+}
 
-.reticle svg { display: block; fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; }
-.reticle .reticle-shadow { stroke: rgba(6, 12, 30, 0.65); stroke-width: 5; }
-.reticle .reticle-dot { fill: var(--accent); stroke: none; }
+.reticle svg {
+  display: block;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+.reticle .reticle-shadow {
+  stroke: rgba(6, 12, 30, 0.65);
+  stroke-width: 5;
+}
+.reticle .reticle-dot {
+  fill: var(--accent);
+  stroke: none;
+}
 
 /* City markers */
-.marker-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.marker-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
 
 .city-marker {
   position: absolute;
@@ -85,14 +133,21 @@ button { font: inherit; color: inherit; cursor: pointer; }
   height: 0;
   opacity: 0;
   visibility: hidden;
-  transition: opacity 180ms ease, visibility 180ms;
+  transition:
+    opacity 180ms ease,
+    visibility 180ms;
+}
+
+/* Only markers on screen get their own compositor layer; there are 100 in all. */
+.city-marker.is-shown {
+  opacity: 1;
+  visibility: visible;
   will-change: transform;
 }
 
-.city-marker.is-shown { opacity: 1; visibility: visible; }
-
 .city-marker-body {
   position: absolute;
+  width: max-content;
   bottom: 6px;
   left: 0;
   transform: translateX(-50%);
@@ -107,13 +162,16 @@ button { font: inherit; color: inherit; cursor: pointer; }
   white-space: nowrap;
 }
 
-.city-marker:not(.has-weather) .city-marker-body { padding-left: 8px; }
-.city-marker:not(.has-weather) .city-marker-icon,
-.city-marker:not(.has-weather) .city-marker-temp { display: none; }
-
-.city-marker-icon { display: block; width: 20px; height: 20px; }
-.city-marker-icon svg { display: block; }
-.city-marker-temp { font-size: 12.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.city-marker-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+.city-marker-temp {
+  font-size: 12.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
 
 .city-marker-name {
   display: none;
@@ -126,12 +184,29 @@ button { font: inherit; color: inherit; cursor: pointer; }
   color: var(--text-muted);
 }
 
-/* Until weather arrives, a distant marker has nothing to show but its pin. */
-.marker-layer:not(.is-named) .city-marker:not(.has-weather) .city-marker-body { display: none; }
+.is-named .city-marker-name {
+  display: block;
+}
+.is-named .city-marker-body {
+  justify-items: center;
+  border-radius: 12px;
+}
 
-.is-named .city-marker-name { display: block; }
-.is-named .city-marker-body { justify-items: center; border-radius: 12px; }
-.is-named .city-marker:not(.has-weather) .city-marker-body { display: block; padding: 3px 8px; }
+/* Without weather, a close marker shows only its name, and a distant one only its pin. */
+.city-marker:not(.has-weather) .city-marker-icon,
+.city-marker:not(.has-weather) .city-marker-temp {
+  display: none;
+}
+.city-marker:not(.has-weather) .city-marker-body {
+  padding-left: 8px;
+}
+.is-named .city-marker:not(.has-weather) .city-marker-body {
+  display: block;
+  padding: 3px 8px;
+}
+.marker-layer:not(.is-named) .city-marker:not(.has-weather) .city-marker-body {
+  display: none;
+}
 
 .city-marker-pin {
   position: absolute;
@@ -149,8 +224,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .search {
   position: absolute;
   top: max(16px, env(safe-area-inset-top));
-  left: 16px;
-  width: min(320px, calc(100vw - 32px));
+  left: max(16px, env(safe-area-inset-left));
+  width: min(320px, calc(100vw - 400px));
   z-index: 3;
 }
 
@@ -164,13 +239,19 @@ button { font: inherit; color: inherit; cursor: pointer; }
   color: var(--text);
   font: inherit;
   font-size: 16px;
+  -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
   -webkit-appearance: none;
   appearance: none;
 }
 
-.search input::placeholder { color: var(--text-muted); }
-.search input:focus { outline: none; border-color: var(--accent); }
+.search input::placeholder {
+  color: var(--text-muted);
+}
+.search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 
 .search-icon {
   position: absolute;
@@ -187,7 +268,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 
 .search-results {
-  list-style: none;
   margin: 8px 0 0;
   padding: 6px;
   border: 1px solid var(--border);
@@ -197,27 +277,43 @@ button { font: inherit; color: inherit; cursor: pointer; }
   overflow-y: auto;
 }
 
-.search-results li[role='option'] {
+.search-option {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  width: 100%;
   padding: 9px 12px;
+  border: 0;
   border-radius: 12px;
-  cursor: pointer;
+  background: none;
+  text-align: left;
 }
 
-.search-results li.is-active,
-.search-results li[role='option']:hover { background: rgba(255, 255, 255, 0.09); }
+.search-option.is-active,
+.search-option:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
 
-.search-name { font-weight: 600; }
-.search-region { font-size: 13px; color: var(--text-muted); }
-.search-status { padding: 10px 12px; color: var(--text-muted); font-size: 14px; }
+.search-name {
+  font-weight: 600;
+}
+.search-region {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.search-status {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+.search-status:not(:empty) {
+  padding: 10px 12px;
+}
 
 /* Map buttons */
 .map-controls {
   position: absolute;
-  left: 16px;
-  bottom: 16px;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(16px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -233,10 +329,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border: 1px solid var(--border);
   border-radius: 50%;
   background: var(--surface);
+  -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
 }
 
-.map-controls button:hover { background: rgba(38, 54, 96, 0.92); }
+.map-controls button:hover {
+  background: rgba(38, 54, 96, 0.92);
+}
 
 .map-controls svg {
   width: 20px;
@@ -284,14 +383,21 @@ button { font: inherit; color: inherit; cursor: pointer; }
   max-width: 460px;
 }
 
-.webgl-notice h2 { margin: 0 0 6px; font-size: 20px; }
-.webgl-notice p { margin: 0; color: var(--text-muted); line-height: 1.5; }
+.webgl-notice h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+.webgl-notice p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
 
 /* Info panel */
 .panel {
   position: absolute;
   top: 16px;
-  right: 16px;
+  right: max(16px, env(safe-area-inset-right));
   bottom: 16px;
   width: 352px;
   display: flex;
@@ -302,11 +408,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--surface);
+  -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   z-index: 2;
 }
 
-.panel-handle { display: none; }
+.panel-handle {
+  display: none;
+}
 
 .place h1 {
   margin: 0;
@@ -347,16 +456,48 @@ button { font: inherit; color: inherit; cursor: pointer; }
   background: linear-gradient(140deg, rgba(92, 164, 230, 0.26), rgba(92, 164, 230, 0.07));
 }
 
-.weather.is-night { background: linear-gradient(140deg, rgba(92, 104, 200, 0.26), rgba(60, 70, 140, 0.09)); }
+.weather.is-night {
+  background: linear-gradient(140deg, rgba(92, 104, 200, 0.26), rgba(60, 70, 140, 0.09));
+}
 
-.weather-headline { display: flex; align-items: center; gap: 10px; }
-.weather-icon { display: block; flex: none; width: 56px; height: 56px; }
-.weather-icon svg { display: block; }
-.weather-temp { font-size: 38px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; }
-.weather-text { min-width: 0; margin-left: 4px; }
-.weather-condition { font-weight: 600; }
-.weather-feels { font-size: 13.5px; color: var(--text-muted); margin-top: 2px; }
-.is-refreshing { opacity: 0.55; transition: opacity 150ms; }
+.weather-headline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.weather-icon {
+  display: block;
+  flex: none;
+  width: 56px;
+  height: 56px;
+}
+.weather-temp {
+  font-size: 38px;
+  font-weight: 650;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.weather-text {
+  min-width: 0;
+  margin-left: 4px;
+}
+.weather-condition {
+  font-weight: 600;
+}
+.weather-feels {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.weather-stale {
+  font-size: 13px;
+  color: var(--warning);
+  margin-top: 2px;
+}
+.is-refreshing {
+  opacity: 0.55;
+  transition: opacity 150ms;
+}
 
 .weather-empty {
   display: flex;
@@ -368,9 +509,15 @@ button { font: inherit; color: inherit; cursor: pointer; }
   color: var(--text-muted);
 }
 
-.skeleton { animation: pulse 1.3s ease-in-out infinite; }
+.skeleton {
+  animation: pulse 1.3s ease-in-out infinite;
+}
 
-@keyframes pulse { 50% { opacity: 0.45; } }
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
 
 .link-button {
   padding: 0;
@@ -382,7 +529,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
   text-underline-offset: 2px;
 }
 
-.details { display: flex; flex-direction: column; gap: 14px; }
+.details {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 
 .stats {
   display: grid;
@@ -391,9 +542,20 @@ button { font: inherit; color: inherit; cursor: pointer; }
   margin: 0;
 }
 
-.stats > div { padding: 9px 12px; border-radius: 12px; background: var(--surface-raised); }
-.stats dt { font-size: 12.5px; color: var(--text-muted); }
-.stats dd { margin: 2px 0 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stats > div {
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: var(--surface-raised);
+}
+.stats dt {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.stats dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 
 .hourly {
   display: flex;
@@ -417,19 +579,40 @@ button { font: inherit; color: inherit; cursor: pointer; }
   background: var(--surface-raised);
 }
 
-.hourly-time { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-.hourly-icon { display: block; width: 28px; height: 28px; }
-.hourly-temp { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hourly-time {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.hourly-icon {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+.hourly-temp {
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 
-.status-line { margin: 0; font-size: 12.5px; color: var(--text-muted); }
-.status-line.is-warning { color: var(--warning); }
+.status-line {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
 
-.settings { display: flex; gap: 10px; }
+.settings {
+  display: flex;
+  gap: 10px;
+}
 
 .segmented {
   display: flex;
   flex: 1;
+  min-width: 0;
+  margin: 0;
   padding: 3px;
+  border: 0;
   border-radius: 12px;
   background: var(--surface-raised);
 }
@@ -446,7 +629,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
   font-weight: 600;
 }
 
-.segmented button[aria-pressed='true'] { background: rgba(255, 255, 255, 0.15); color: var(--text); }
+.segmented button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--text);
+}
 
 .credits {
   margin-top: auto;
@@ -455,17 +641,67 @@ button { font: inherit; color: inherit; cursor: pointer; }
   color: var(--text-muted);
 }
 
-.credits a { color: inherit; }
+.credits a {
+  color: inherit;
+}
 
-/* Phones: the panel becomes a bottom sheet. Sizes match the insets in App.tsx. */
-@media (max-width: 719px) {
-  .search { left: 12px; width: calc(100vw - 24px); top: max(10px, env(safe-area-inset-top)); }
+.fatal {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+}
 
-  .map-controls { left: auto; right: 12px; bottom: 226px; }
+.fatal h1 {
+  margin: 0;
+  font-size: 22px;
+}
+.fatal p {
+  margin: 0;
+  color: var(--text-muted);
+}
 
-  .notice { top: 66px; max-width: calc(100vw - 24px); white-space: normal; }
+.fatal button {
+  padding: 10px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  font-weight: 600;
+}
 
-  .webgl-notice { left: 16px; right: 16px; top: 76px; }
+/* Upright phones: the panel becomes a bottom sheet. Sizes match the insets in App.tsx. */
+@media (max-width: 719px) and (orientation: portrait) {
+  .stage {
+    --globe-x: 50%;
+    --globe-y: calc(50% - 75px);
+  }
+
+  .search {
+    left: 12px;
+    width: calc(100vw - 24px);
+    top: max(10px, env(safe-area-inset-top));
+  }
+
+  .map-controls {
+    left: auto;
+    right: 12px;
+    bottom: 226px;
+  }
+
+  .notice {
+    top: 66px;
+    max-width: calc(100vw - 24px);
+    white-space: normal;
+  }
+
+  .webgl-notice {
+    left: 16px;
+    right: 16px;
+    top: 76px;
+  }
 
   .panel {
     top: auto;
@@ -482,7 +718,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
     transition: max-height 240ms ease;
   }
 
-  .panel.is-expanded { max-height: min(84vh, 640px); overflow-y: auto; }
+  .panel.is-expanded {
+    max-height: min(84vh, 640px);
+    overflow-y: auto;
+  }
 
   .panel-handle {
     display: block;
@@ -497,7 +736,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   }
 
   .panel-handle::before {
-    content: '';
+    content: "";
     display: block;
     width: 44px;
     height: 4px;
@@ -506,26 +745,75 @@ button { font: inherit; color: inherit; cursor: pointer; }
     background: rgba(255, 255, 255, 0.34);
   }
 
-  .place h1 { font-size: 19px; }
-  .place p { margin-top: 1px; font-size: 12.5px; }
+  .place h1 {
+    font-size: 19px;
+  }
+  .place p {
+    margin-top: 1px;
+    font-size: 12.5px;
+  }
 
-  .clock { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 12px; }
-  .clock-time { font-size: 28px; }
-  .clock-meta { margin-top: 0; font-size: 12.5px; gap: 0 8px; }
+  .clock {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 12px;
+  }
+  .clock-time {
+    font-size: 28px;
+  }
+  .clock-meta {
+    margin-top: 0;
+    font-size: 12.5px;
+    gap: 0 8px;
+  }
 
-  .weather { padding: 6px 10px; min-height: 50px; }
-  .weather-icon { width: 38px; height: 38px; }
-  .weather-temp { font-size: 26px; }
-  .weather-condition { font-size: 14px; }
-  .weather-feels { font-size: 12.5px; margin-top: 0; }
-  .weather-empty { min-height: 38px; font-size: 13.5px; }
+  .weather {
+    padding: 6px 10px;
+    min-height: 50px;
+  }
+  .weather-icon {
+    width: 38px;
+    height: 38px;
+  }
+  .weather-temp {
+    font-size: 26px;
+  }
+  .weather-condition {
+    font-size: 14px;
+  }
+  .weather-feels {
+    font-size: 12.5px;
+    margin-top: 0;
+  }
+  .weather-empty {
+    min-height: 38px;
+    font-size: 13.5px;
+  }
 
-  .details { display: none; }
-  .is-expanded .details { display: flex; }
+  .details {
+    display: none;
+  }
+  .is-expanded .details {
+    display: flex;
+  }
 
-  .credits { margin-top: 0; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .credits {
+    margin-top: 0;
+    font-size: 10.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition: none !important; animation: none !important; }
+  *,
+  *::before,
+  *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: this must beat every component's own motion. */
+    transition: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: this must beat every component's own motion. */
+    animation: none !important;
+  }
 }

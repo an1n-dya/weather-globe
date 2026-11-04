@@ -13,21 +13,24 @@ Then open http://localhost:5173.
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `npm run dev` | Dev server |
-| `npm run build` | Type-check and build to `dist/` for any static host |
-| `npm run preview` | Serve the production build |
-| `npm test` | Unit tests |
-| `npm run e2e` | Browser tests on desktop and phone viewports, with the weather API mocked |
-| `npm run check:reference` | Compare time zones against the live API; uses about 110 calls of the free quota |
-| `npm run data` | Rebuild `public/data`, `src/data` and the icons; downloads GeoNames cities |
+| Command                   | What it does                                                                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`             | Dev server                                                                                                                                                                    |
+| `npm run build`           | Type-check and build to `dist/` for any static host                                                                                                                           |
+| `npm run preview`         | Serve the production build                                                                                                                                                    |
+| `npm run lint`            | Check formatting and lint rules with Biome                                                                                                                                    |
+| `npm run format`          | Fix formatting and safe lint issues                                                                                                                                           |
+| `npm run typecheck`       | Type-check without building                                                                                                                                                   |
+| `npm test`                | Unit tests                                                                                                                                                                    |
+| `npm run e2e`             | Browser tests in Chromium, Firefox, and WebKit, on desktop and phone viewports, under the production headers and with the weather API mocked; includes an accessibility audit |
+| `npm run check:reference` | Compare time zones against the live API; uses about 110 calls of the free quota                                                                                               |
+| `npm run data`            | Rebuild `public/data`, `src/data` and the icons; downloads GeoNames cities                                                                                                    |
 
-Run `npx playwright install chromium` once before `npm run e2e`.
+Run `npx playwright install chromium firefox webkit` once before `npm run e2e`. To test one browser, add `-- --project=desktop` (or `mobile`, `firefox`, `webkit`, `iphone`).
 
 ## How it fits together
 
-- `src/globe`: the Three.js scene. The Earth is an icosphere whose faces are marked land or water by a 1-bit mask built ahead of time (`scripts/build-land-mask.ts`). The mask depends on face order, so rebuild it if `icosphere.ts` changes.
+- `src/globe`: the Three.js scene, loaded separately so the time and weather appear first. The mesh is built in a worker (`earthWorker.ts`). The Earth is an icosphere whose faces are marked land or water by a 1-bit mask built ahead of time (`scripts/build-land-mask.ts`). The mask depends on face order, so rebuild it if `icosphere.ts` changes.
 - `src/geo`: coordinates, sun position, time zones, and nearest-place names.
 - `src/weather/provider.ts`: the only file that talks to the weather service.
 - `src/controller.ts`: connects the globe, data loading, and the store. `src/ui` is the React interface.
