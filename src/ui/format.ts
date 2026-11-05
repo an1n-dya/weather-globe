@@ -53,3 +53,24 @@ export function formatAge(ms: number): string {
   const hours = Math.floor(minutes / 60);
   return `${hours} h ago`;
 }
+
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+/** The nearest of eight compass points, for a bearing in degrees. */
+export function compassPoint(degrees: number): string {
+  const index = Math.round((((degrees % 360) + 360) % 360) / 45) % 8;
+  return COMPASS[index] ?? "N";
+}
+
+/**
+ * "Today", "Tomorrow" or a short weekday for a local date like 2026-11-04,
+ * relative to `today`, the place's own date in the same form.
+ */
+export function formatDayName(date: string, today: string): string {
+  if (date === today) return "Today";
+  const day = new Date(`${date}T12:00:00Z`);
+  const next = new Date(`${today}T12:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  if (day.getTime() === next.getTime()) return "Tomorrow";
+  return new Intl.DateTimeFormat(undefined, { weekday: "short", timeZone: "UTC" }).format(day);
+}

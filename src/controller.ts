@@ -4,19 +4,23 @@ import { countryName, loadPlaceIndex, type Place, type PlaceIndex } from "./geo/
 import { isSunUp } from "./geo/sun";
 import type { GlobeView } from "./globe/camera";
 import type { MarkerCity } from "./globe/markers";
-import type { GlobeScene, LightPoint } from "./globe/scene";
-import { type Settings, saveSettings, useStore } from "./store";
+import type { GlobeScene } from "./globe/scene";
+import { forecastForSelection, type Settings, saveSettings, useStore } from "./store";
 import { formatTemperature } from "./ui/format";
 import { iconSrc } from "./ui/icons";
 import { formatHash, parseHash } from "./urlState";
-import { startCityWeather } from "./weather/cityWeather";
+import { skyFor } from "./weather/conditions";
+import type { SkySample } from "./weather/field";
 import { ForecastLoader } from "./weather/forecastLoader";
-import { type CityCurrent, fetchForecast } from "./weather/provider";
+import { fetchForecast, type SkyCurrent } from "./weather/provider";
+import { skyPoints } from "./weather/skyPoints";
+import { startSkyWeather } from "./weather/skyWeather";
 import { describeWeatherCode } from "./weather/wmo";
 
 export const majorCities = majorCitiesJson as MarkerCity[];
+/** The cities come first, so their rows line up with the markers. */
+const samplePoints = [...majorCities, ...skyPoints(majorCities)];
 
-const LIGHT_COUNT = 9000;
 const PLACE_REFRESH_MS = 100;
 const BACKGROUND_REFRESH_MS = 60_000;
 /** A named destination keeps its name while the reticle stays this close. */
@@ -30,8 +34,8 @@ const forecastLoader = new ForecastLoader(fetchForecast, (forecast) => {
 let scene: GlobeScene | null = null;
 let placeIndex: PlaceIndex | null = null;
 let namedPlace: (Place & { lat: number; lon: number }) | null = null;
-let lightPoints: LightPoint[] | null = null;
-let cityWeather = new Map<MarkerCity, CityCurrent>();
+let cityWeather = new Map<MarkerCity, SkyCurrent>();
+let skySamples: SkySample[] = [];
 let lastPlaceAt = 0;
 
 function placeAt(lat: number, lon: number): Place {
@@ -53,6 +57,26 @@ function pushCityWeather(): void {
       iconSrc: iconSrc(icon, isSunUp(city.lat, city.lon, now)),
       temperature: formatTemperature(current.temp, unit),
     };
+  });
+}
+
+/** The selected place's own forecast shapes the sky right around it. */
+function pushLocalSky(): void {
+  const forecast = forecastForSelection(useStore.getState());
+  const data = forecast?.data;
+  if (!scene || !forecast?.key || !data) return;
+  const [lat = 0, lon = 0] = forecast.key.split(",").map(Number);
+  const { current } = data;
+  scene.setLocalSky({
+    lat,
+    lon,
+    sky: skyFor(current.code, {
+      cloudCover: current.cloudCover,
+      precipitation: current.precipitation,
+      temp: current.temp,
+    }),
+    windDirection: current.windDirection,
+    wind: current.wind,
   });
 }
 
@@ -112,6 +136,7 @@ export function updateSettings(change: Partial<Settings>): void {
   useStore.setState({ settings });
   saveSettings(settings);
   pushCityWeather();
+  scene?.setWeatherVisible(settings.weather);
 }
 
 export function retryForecast(): void {
@@ -121,8 +146,10 @@ export function retryForecast(): void {
 export function attachScene(next: GlobeScene | null): void {
   scene = next;
   if (next) {
+    next.setWeatherVisible(useStore.getState().settings.weather);
     pushCityWeather();
-    if (lightPoints) next.setLights(lightPoints);
+    if (skySamples.length) next.setSkySamples(skySamples);
+    pushLocalSky();
   }
 }
 
@@ -134,13 +161,11 @@ export function startApp(): () => void {
   const { lat, lon } = useStore.getState();
   forecastLoader.select(lat, lon);
 
-  // Lazy-loaded: names and night lights arrive without delaying anything else.
+  // Lazy-loaded: names arrive without delaying anything else.
   void loadPlaceIndex()
-    .then(({ index, cities }) => {
+    .then(({ index }) => {
       if (stopped) return;
       placeIndex = index;
-      lightPoints = cities.slice(0, LIGHT_COUNT).map(([, , lat, lon, pop]) => ({ lat, lon, pop }));
-      scene?.setLights(lightPoints);
       const current = useStore.getState();
       useStore.setState({ place: placeAt(current.lat, current.lon) });
     })
@@ -151,13 +176,29 @@ export function startApp(): () => void {
       }
     });
 
-  const stopCityWeather = startCityWeather(majorCities, (rows) => {
+  const stopSkyWeather = startSkyWeather(samplePoints, (rows) => {
     cityWeather = new Map();
     majorCities.forEach((city, i) => {
       const row = rows[i];
       if (row) cityWeather.set(city, row);
     });
+    skySamples = samplePoints.flatMap((point, i) => {
+      const row = rows[i];
+      if (!row) return [];
+      const sky = skyFor(row.code, {
+        cloudCover: row.cloudCover,
+        precipitation: row.precipitation,
+        temp: row.temp,
+      });
+      return [{ lat: point.lat, lon: point.lon, sky }];
+    });
     pushCityWeather();
+    scene?.setSkySamples(skySamples);
+  });
+
+  // The selected place's forecast arriving, or changing, reshapes its sky.
+  const stopLocalSky = useStore.subscribe((state, previous) => {
+    if (state.forecast !== previous.forecast && state.forecast.status === "ready") pushLocalSky();
   });
 
   const refreshIfVisible = () => {
@@ -178,7 +219,8 @@ export function startApp(): () => void {
 
   return () => {
     stopped = true;
-    stopCityWeather();
+    stopSkyWeather();
+    stopLocalSky();
     clearInterval(refreshTimer);
     window.removeEventListener("hashchange", onHashChange);
     window.removeEventListener("online", retryForecast);

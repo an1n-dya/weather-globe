@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "e2e": "playwright test",
-    "data": "tsx scripts/build-land-mask.ts && tsx scripts/build-cities.ts && tsx scripts/build-icons.ts",
+    "data": "tsx scripts/build-land.ts && tsx scripts/build-cities.ts && tsx scripts/build-textures.ts && tsx scripts/build-stars.ts && tsx scripts/build-icons.ts",
     "check:reference": "tsx scripts/check-reference.ts"
   },
   "dependencies": {
@@ -42,6 +42,7 @@
     "@vitejs/plugin-react": "^6.2.1",
     "d3-geo": "^3.1.2",
     "fflate": "^0.8.3",
+    "sharp": "^0.34.5",
     "topojson-client": "^3.1.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
