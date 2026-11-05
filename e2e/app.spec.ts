@@ -12,8 +12,6 @@ interface ApiMock {
   delayMs: number;
 }
 
-const DAYS = Array.from({ length: 7 }, (_, i) => `2026-11-${String(4 + i).padStart(2, "0")}`);
-
 function forecastBody(url: URL) {
   const lat = Number(url.searchParams.get("latitude"));
   const zone = lat > 30 ? "Asia/Tokyo" : "Asia/Kolkata";
@@ -29,27 +27,19 @@ function forecastBody(url: URL) {
       apparent_temperature: 29.1,
       relative_humidity_2m: 61,
       wind_speed_10m: 12,
-      wind_direction_10m: 270,
       weather_code: 2,
       is_day: 1,
-      cloud_cover: 40,
-      precipitation: 0,
     },
     hourly: {
       time: hours,
       temperature_2m: hours.map((_, i) => 20 + (i % 10)),
       weather_code: hours.map((_, i) => [0, 2, 3, 61, 95][i % 5]),
       is_day: hours.map((_, i) => (i % 24 >= 6 && i % 24 < 18 ? 1 : 0)),
-      precipitation_probability: hours.map((_, i) => (i % 3) * 40),
     },
     daily: {
-      time: DAYS,
-      sunrise: DAYS.map((day) => `${day}T05:42`),
-      sunset: DAYS.map((day) => `${day}T16:58`),
-      weather_code: [2, 61, 3, 0, 95, 71, 1],
-      temperature_2m_max: [29, 27, 26, 28, 24, 18, 22],
-      temperature_2m_min: [19, 18, 17, 18, 16, 9, 12],
-      precipitation_probability_max: [10, 80, 20, 0, 90, 60, 5],
+      time: ["2026-11-04", "2026-11-05"],
+      sunrise: ["2026-11-04T05:42", "2026-11-05T05:43"],
+      sunset: ["2026-11-04T16:58", "2026-11-05T16:57"],
     },
   };
 }
@@ -412,8 +402,9 @@ test("browser shortcuts stay with the browser", async ({ page, isMobile }) => {
   expect(prevented).toEqual({ ctrlMinus: false, altLeft: false, plainLeft: true });
 });
 
-/** Counts WebGL draw calls, which show whether the globe is redrawing. */
-async function countDraws(page: Page) {
+test("the globe redraws after the graphics context is lost and restored", async ({ page }) => {
+  // Chromium keeps showing the last frame after a simulated loss, so a screenshot
+  // can't tell whether a redraw happened. Counting draw calls can.
   await page.addInitScript(() => {
     const counter = window as unknown as { draws: number };
     counter.draws = 0;
@@ -421,7 +412,7 @@ async function countDraws(page: Page) {
       string,
       (...args: unknown[]) => unknown
     >;
-    for (const method of ["drawArrays", "drawElements", "drawElementsInstanced"]) {
+    for (const method of ["drawArrays", "drawElements"]) {
       const original = prototype[method];
       if (!original) continue;
       prototype[method] = function (this: unknown, ...args: unknown[]) {
@@ -430,58 +421,37 @@ async function countDraws(page: Page) {
       };
     }
   });
-  return () => page.evaluate(() => (window as unknown as { draws: number }).draws);
-}
+  const draws = () => page.evaluate(() => (window as unknown as { draws: number }).draws);
 
-test("drifting clouds keep the globe drawing while it is idle", async ({ page }) => {
-  const draws = await countDraws(page);
   await mockApi(page);
   await page.goto("/#20.00,0.00");
   await globeReady(page);
-  await expect(page.locator(".stage[data-globe=ready]")).toBeAttached({ timeout: 20_000 });
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  // Long enough for the mesh and night lights to finish loading.
+  await page.waitForTimeout(1500);
+
+  // An idle globe draws nothing, so any increase below comes from the restore.
   const before = await draws();
-  await expect.poll(draws, { timeout: 5_000 }).toBeGreaterThan(before);
-});
+  await page.waitForTimeout(300);
+  expect(await draws()).toBe(before);
 
-test.describe("with reduced motion", () => {
-  test.use({ reducedMotion: "reduce" });
-
-  test("an idle globe stops drawing, and redraws after a lost context", async ({ page }) => {
-    // Chromium keeps showing the last frame after a simulated loss, so a screenshot
-    // can't tell whether a redraw happened. Counting draw calls can.
-    const draws = await countDraws(page);
-
-    await mockApi(page);
-    await page.goto("/#20.00,0.00");
-    await globeReady(page);
-    await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
-    // Once the last maps have loaded, nothing should change the picture.
-    await expect(page.locator(".stage[data-globe=ready]")).toBeAttached({ timeout: 20_000 });
-    await page.waitForTimeout(500);
-
-    // An idle globe draws nothing, so any increase below comes from the restore.
-    const before = await draws();
-    await page.waitForTimeout(300);
-    expect(await draws()).toBe(before);
-
-    await page.locator(".stage canvas").evaluate(async (element) => {
-      const gl = (element as HTMLCanvasElement).getContext("webgl2");
-      const extension = gl?.getExtension("WEBGL_lose_context");
-      if (!extension) throw new Error("This browser cannot simulate a lost context");
-      await new Promise((resolve) => {
-        element.addEventListener("webglcontextlost", resolve, { once: true });
-        extension.loseContext();
-      });
-      // Restoring is only allowed once the browser has finished handling the loss.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await new Promise((resolve) => {
-        element.addEventListener("webglcontextrestored", resolve, { once: true });
-        extension.restoreContext();
-      });
+  await page.locator(".stage canvas").evaluate(async (element) => {
+    const gl = (element as HTMLCanvasElement).getContext("webgl2");
+    const extension = gl?.getExtension("WEBGL_lose_context");
+    if (!extension) throw new Error("This browser cannot simulate a lost context");
+    await new Promise((resolve) => {
+      element.addEventListener("webglcontextlost", resolve, { once: true });
+      extension.loseContext();
     });
-
-    await expect.poll(draws, { timeout: 3_000 }).toBeGreaterThan(before);
+    // Restoring is only allowed once the browser has finished handling the loss.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => {
+      element.addEventListener("webglcontextrestored", resolve, { once: true });
+      extension.restoreContext();
+    });
   });
+
+  await expect.poll(draws, { timeout: 3_000 }).toBeGreaterThan(before);
 });
 
 test("coming back online fetches the weather straight away", async ({ page, context }) => {
@@ -569,38 +539,4 @@ test("there are no accessibility violations", async ({ page }, info) => {
   await expect(page.getByRole("option", { name: /Kathmandu/ })).toBeVisible();
   const open = await new AxeBuilder({ page }).include(".search").analyze();
   expect(open.violations.map((v) => v.id)).toEqual([]);
-});
-
-test("the panel shows the week ahead, rain chances and the wind", async ({ page, isMobile }) => {
-  await mockApi(page);
-  await page.goto("/#51.50,-0.13,3.00");
-  await globeReady(page);
-  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
-  if (isMobile) await page.getByRole("button", { name: "Show more" }).click();
-
-  const week = page.getByRole("region", { name: "Next 7 days" });
-  await expect(week.getByRole("listitem")).toHaveCount(7);
-  await expect(week.getByRole("listitem").first()).toContainText("Today");
-  await expect(week.getByRole("listitem").nth(1)).toContainText("Tomorrow");
-  await expect(week.getByRole("listitem").nth(1)).toContainText("80%");
-  await expect(page.getByRole("list", { name: "Next hours" })).toContainText(
-    "chance of precipitation",
-  );
-  await expect(page.getByText("from W")).toBeVisible();
-});
-
-test("clouds and rain can be hidden, and stay hidden", async ({ page }) => {
-  await mockApi(page);
-  await page.goto("/#20.00,0.00");
-  await globeReady(page);
-  const toggle = page.getByRole("button", { name: "Clouds and rain" });
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
-  await page.reload();
-  await globeReady(page);
-  await expect(page.getByRole("button", { name: "Clouds and rain" })).toHaveAttribute(
-    "aria-pressed",
-    "false",
-  );
 });

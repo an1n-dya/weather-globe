@@ -4,27 +4,15 @@
  */
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
-const HOURS_SHOWN = 24;
-const DAYS_SHOWN = 7;
+const HOURS_SHOWN = 12;
 const REQUEST_TIMEOUT_MS = 15_000;
 
-export interface HourForecast {
+interface HourForecast {
   /** Local wall-clock time at the place, e.g. 2026-11-04T13:00. */
   time: string;
   temp: number;
   code: number;
   isDay: boolean;
-  /** Percent, when the service has an estimate. */
-  precipChance: number | null;
-}
-
-export interface DayForecast {
-  /** Local date at the place, e.g. 2026-11-04. */
-  date: string;
-  code: number;
-  high: number;
-  low: number;
-  precipChance: number | null;
 }
 
 export interface Forecast {
@@ -36,29 +24,17 @@ export interface Forecast {
     feelsLike: number;
     humidity: number;
     wind: number;
-    /** Degrees clockwise from north that the wind blows from. */
-    windDirection: number | null;
     code: number;
     isDay: boolean;
-    /** Percent. */
-    cloudCover: number | null;
-    /** Millimetres. */
-    precipitation: number | null;
   };
   hourly: HourForecast[];
-  daily: DayForecast[];
   sunrise: string | null;
   sunset: string | null;
 }
 
-/** Current conditions at one of many places fetched together. */
-export interface SkyCurrent {
+export interface CityCurrent {
   temp: number;
   code: number;
-  cloudCover: number | null;
-  precipitation: number | null;
-  windSpeed: number | null;
-  windDirection: number | null;
 }
 
 export interface SearchResult {
@@ -87,15 +63,11 @@ async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
   }
 }
 
-const isNumber = (value: unknown): value is number =>
-  typeof value === "number" && Number.isFinite(value);
-
-/** A value the display can do without: missing simply means unknown. */
-const optional = (value: unknown): number | null => (isNumber(value) ? value : null);
-
 /** A missing value must not reach the display, where it would read as zero. */
 function requireNumbers(...values: unknown[]): void {
-  if (!values.every(isNumber)) throw new Error("Weather response is missing a value");
+  if (!values.every((value) => typeof value === "number" && Number.isFinite(value))) {
+    throw new Error("Weather response is missing a value");
+  }
 }
 
 interface RawForecast {
@@ -106,27 +78,19 @@ interface RawForecast {
     apparent_temperature: number;
     relative_humidity_2m: number;
     wind_speed_10m: number;
-    wind_direction_10m?: number | null;
     weather_code: number;
     is_day: number;
-    cloud_cover?: number | null;
-    precipitation?: number | null;
   };
   hourly: {
     time: string[];
     temperature_2m: Array<number | null>;
     weather_code: Array<number | null>;
     is_day: Array<number | null>;
-    precipitation_probability?: Array<number | null>;
   };
   daily: {
     time: string[];
     sunrise: Array<string | null>;
     sunset: Array<string | null>;
-    weather_code?: Array<number | null>;
-    temperature_2m_max?: Array<number | null>;
-    temperature_2m_min?: Array<number | null>;
-    precipitation_probability_max?: Array<number | null>;
   };
 }
 
@@ -146,24 +110,6 @@ function sunEvents(
   return valid ? { sunrise, sunset } : { sunrise: null, sunset: null };
 }
 
-function parseDays(daily: RawForecast["daily"]): DayForecast[] {
-  const days: DayForecast[] = [];
-  daily.time.forEach((date, i) => {
-    const code = daily.weather_code?.[i];
-    const high = daily.temperature_2m_max?.[i];
-    const low = daily.temperature_2m_min?.[i];
-    if (!isNumber(code) || !isNumber(high) || !isNumber(low) || days.length >= DAYS_SHOWN) return;
-    days.push({
-      date,
-      code,
-      high,
-      low,
-      precipChance: optional(daily.precipitation_probability_max?.[i]),
-    });
-  });
-  return days;
-}
-
 export function parseForecast(raw: RawForecast): Forecast {
   const { current, hourly, daily } = raw;
   requireNumbers(
@@ -181,13 +127,7 @@ export function parseForecast(raw: RawForecast): Forecast {
     const code = hourly.weather_code[i];
     if (time.slice(0, 13) < currentHour || hours.length >= HOURS_SHOWN) return;
     if (temp == null || code == null) return;
-    hours.push({
-      time,
-      temp,
-      code,
-      isDay: hourly.is_day[i] === 1,
-      precipChance: optional(hourly.precipitation_probability?.[i]),
-    });
+    hours.push({ time, temp, code, isDay: hourly.is_day[i] === 1 });
   });
 
   return {
@@ -198,14 +138,10 @@ export function parseForecast(raw: RawForecast): Forecast {
       feelsLike: current.apparent_temperature,
       humidity: current.relative_humidity_2m,
       wind: current.wind_speed_10m,
-      windDirection: optional(current.wind_direction_10m),
       code: current.weather_code,
       isDay: current.is_day === 1,
-      cloudCover: optional(current.cloud_cover),
-      precipitation: optional(current.precipitation),
     },
     hourly: hours,
-    daily: parseDays(daily),
     ...sunEvents(daily.sunrise[0], daily.sunset[0], daily.time[0]),
   };
 }
@@ -219,53 +155,37 @@ export async function fetchForecast(
     latitude: String(lat),
     longitude: String(lon),
     current:
-      "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_direction_10m,weather_code,is_day,cloud_cover,precipitation",
-    hourly: "temperature_2m,weather_code,is_day,precipitation_probability",
-    daily:
-      "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset",
+      "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day",
+    hourly: "temperature_2m,weather_code,is_day",
+    daily: "sunrise,sunset",
     timezone: "auto",
-    forecast_days: String(DAYS_SHOWN),
-    forecast_hours: String(HOURS_SHOWN),
+    forecast_days: "2",
   });
   return parseForecast((await getJson(`${FORECAST_URL}?${params}`, signal)) as RawForecast);
 }
 
 interface RawCurrentOnly {
-  current?: {
-    temperature_2m?: number | null;
-    weather_code?: number | null;
-    cloud_cover?: number | null;
-    precipitation?: number | null;
-    wind_speed_10m?: number | null;
-    wind_direction_10m?: number | null;
-  };
+  current?: { temperature_2m: number; weather_code: number };
 }
 
 /** Current conditions for many places in one request, in the same order. */
-export async function fetchCurrentBatch(
-  points: ReadonlyArray<{ lat: number; lon: number }>,
+export async function fetchCitiesCurrent(
+  cities: ReadonlyArray<{ lat: number; lon: number }>,
   signal?: AbortSignal,
-): Promise<Array<SkyCurrent | null>> {
+): Promise<Array<CityCurrent | null>> {
   const params = new URLSearchParams({
-    latitude: points.map((p) => p.lat).join(","),
-    longitude: points.map((p) => p.lon).join(","),
-    current:
-      "temperature_2m,weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m",
+    latitude: cities.map((c) => c.lat).join(","),
+    longitude: cities.map((c) => c.lon).join(","),
+    current: "temperature_2m,weather_code",
   });
   const raw = await getJson(`${FORECAST_URL}?${params}`, signal);
   // A single location comes back as an object rather than a list.
   const rows = (Array.isArray(raw) ? raw : [raw]) as RawCurrentOnly[];
-  return rows.map(({ current }) => {
-    if (!isNumber(current?.temperature_2m) || !isNumber(current.weather_code)) return null;
-    return {
-      temp: current.temperature_2m,
-      code: current.weather_code,
-      cloudCover: optional(current.cloud_cover),
-      precipitation: optional(current.precipitation),
-      windSpeed: optional(current.wind_speed_10m),
-      windDirection: optional(current.wind_direction_10m),
-    };
-  });
+  return rows.map(({ current }) =>
+    typeof current?.temperature_2m === "number" && typeof current.weather_code === "number"
+      ? { temp: current.temperature_2m, code: current.weather_code }
+      : null,
+  );
 }
 
 interface RawGeocoding {

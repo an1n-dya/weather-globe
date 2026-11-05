@@ -1,25 +1,20 @@
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { retryForecast, updateSettings } from "../controller";
 import { formatCoords } from "../geo/coords";
 import { formatDifference, formatOffset, zoneFor, zoneOffsetMinutes } from "../geo/timezone";
 import { forecastForSelection, useStore } from "../store";
-import { skyFor } from "../weather/conditions";
 import type { Forecast } from "../weather/provider";
 import { describeWeatherCode } from "../weather/wmo";
-import { backdropFor } from "./backdrop";
 import {
-  compassPoint,
   formatAge,
   formatClock,
   formatDate,
-  formatDayName,
   formatLocalHour,
   formatLocalTime,
   formatTemperature,
   formatWind,
 } from "./format";
 import { iconSrc } from "./icons";
-import { WeatherIcon } from "./WeatherIcon";
 
 /** Re-renders on each new second, so the clock never skips or lags. */
 function useNow(): Date {
@@ -47,7 +42,13 @@ function Headline({ data, staleNote }: { data: Forecast; staleNote: string | nul
   const condition = describeWeatherCode(data.current.code);
   return (
     <div className="weather-headline" data-testid="weather">
-      <WeatherIcon icon={condition.icon} isDay={data.current.isDay} size={56} />
+      <img
+        className="weather-icon"
+        src={iconSrc(condition.icon, data.current.isDay)}
+        alt=""
+        width={56}
+        height={56}
+      />
       <div className="weather-temp" data-testid="temperature">
         {formatTemperature(data.current.temp, unit)}
       </div>
@@ -75,22 +76,7 @@ function Stats({ data }: { data: Forecast }) {
     <dl className="stats">
       <div>
         <dt>Wind</dt>
-        <dd>
-          {formatWind(data.current.wind, unit)}
-          {data.current.windDirection !== null && data.current.wind >= 1 && (
-            <span className="wind-from">
-              <svg
-                viewBox="0 0 16 16"
-                aria-hidden="true"
-                // Points where the wind blows to, away from where it comes from.
-                style={{ transform: `rotate(${data.current.windDirection + 180}deg)` }}
-              >
-                <path d="M8 13.5V3M4.2 6.8L8 3l3.8 3.8" />
-              </svg>
-              from {compassPoint(data.current.windDirection)}
-            </span>
-          )}
-        </dd>
+        <dd>{formatWind(data.current.wind, unit)}</dd>
       </div>
       <div>
         <dt>Humidity</dt>
@@ -126,72 +112,10 @@ function Hourly({ data }: { data: Forecast }) {
               height={28}
             />
             <span className="hourly-temp">{formatTemperature(hour.temp, unit)}</span>
-            <span className="hourly-rain">
-              {hour.precipChance !== null && hour.precipChance >= 10 && (
-                <>
-                  {Math.round(hour.precipChance)}%
-                  <span className="sr-only"> chance of precipitation</span>
-                </>
-              )}
-            </span>
           </li>
         );
       })}
     </ul>
-  );
-}
-
-/** The week ahead, each day's range drawn on one scale shared by the whole week. */
-function Daily({ data }: { data: Forecast }) {
-  const unit = useStore((s) => s.settings.unit);
-  const days = data.daily;
-  const first = days[0];
-  if (!first) return null;
-  const low = Math.min(...days.map((d) => d.low));
-  const high = Math.max(...days.map((d) => d.high));
-  const span = Math.max(1, high - low);
-  return (
-    <section className="daily" aria-label="Next 7 days">
-      <h2 className="section-title">Next 7 days</h2>
-      <ul>
-        {days.map((day) => {
-          const condition = describeWeatherCode(day.code);
-          const start = ((day.low - low) / span) * 100;
-          const width = Math.max(6, ((day.high - day.low) / span) * 100);
-          return (
-            <li key={day.date}>
-              <span className="daily-day">{formatDayName(day.date, first.date)}</span>
-              <img
-                className="daily-icon"
-                src={iconSrc(condition.icon, true)}
-                alt={condition.label}
-                width={24}
-                height={24}
-              />
-              <span className="daily-rain">
-                {day.precipChance !== null && day.precipChance >= 10 && (
-                  <>
-                    {Math.round(day.precipChance)}%
-                    <span className="sr-only"> chance of precipitation</span>
-                  </>
-                )}
-              </span>
-              <span className="daily-low">
-                <span className="sr-only">Low </span>
-                {formatTemperature(day.low, unit)}
-              </span>
-              <span className="daily-range" aria-hidden="true">
-                <span style={{ left: `${start}%`, width: `${Math.min(width, 100 - start)}%` }} />
-              </span>
-              <span className="daily-high">
-                <span className="sr-only">High </span>
-                {formatTemperature(day.high, unit)}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
-    </section>
   );
 }
 
@@ -254,11 +178,6 @@ export function InfoPanel() {
   const offset = zoneOffsetMinutes(zone, now);
   const viewerOffset = -now.getTimezoneOffset();
   const isDay = data?.current.isDay ?? true;
-  const condition = data ? describeWeatherCode(data.current.code) : null;
-  const backdrop = condition ? backdropFor(condition.icon, isDay) : null;
-  const intensity = data
-    ? skyFor(data.current.code, { precipitation: data.current.precipitation }).precip
-    : 0;
   const loading = !moving && (forecast === null || forecast.status === "loading");
   const age = forecast?.fetchedAt != null ? now.getTime() - forecast.fetchedAt : 0;
   const staleNote =
@@ -297,20 +216,9 @@ export function InfoPanel() {
         className={`weather${isDay ? "" : " is-night"}`}
         aria-label="Weather"
         aria-busy={loading}
-        data-backdrop={backdrop ?? undefined}
       >
-        {backdrop && (
-          <div
-            className="weather-backdrop"
-            aria-hidden="true"
-            style={{ "--intensity": Math.max(0.35, intensity).toFixed(2) } as CSSProperties}
-          />
-        )}
         {data ? (
-          <div
-            key={forecast?.key}
-            className={`weather-body${forecast?.status === "loading" ? " is-refreshing" : ""}`}
-          >
+          <div className={forecast?.status === "loading" ? "is-refreshing" : undefined}>
             <Headline data={data} staleNote={staleNote} />
           </div>
         ) : forecast?.status === "error" ? (
@@ -336,7 +244,6 @@ export function InfoPanel() {
           <>
             <Stats data={data} />
             <Hourly data={data} />
-            <Daily data={data} />
           </>
         )}
         {forecast?.status === "ready" && <p className="status-line">Updated {formatAge(age)}</p>}
@@ -367,14 +274,6 @@ export function InfoPanel() {
         {" · "}
         <a href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">
           Natural Earth
-        </a>
-        {" · "}
-        <a
-          href="https://science.nasa.gov/earth/earth-observatory/collections/blue-marble"
-          target="_blank"
-          rel="noreferrer"
-        >
-          NASA imagery
         </a>
       </footer>
     </section>
