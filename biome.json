@@ -13,13 +13,7 @@
     "indentStyle": "space",
     "lineWidth": 100
   },
-  "assist": {
-    "actions": {
-      "source": {
-        "organizeImports": "on"
-      }
-    }
-  },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "linter": {
     "enabled": true,
     "rules": {
@@ -33,14 +27,8 @@
   },
   "overrides": [
     {
-      "includes": ["scripts/**", "tests/**"],
-      "linter": {
-        "rules": {
-          "style": {
-            "noNonNullAssertion": "off"
-          }
-        }
-      }
+      "includes": ["src/globe/earthMesh.ts", "src/globe/icosphere.ts", "scripts/**", "tests/**"],
+      "linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }
     }
   ]
 }

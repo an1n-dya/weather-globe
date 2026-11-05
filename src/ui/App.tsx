@@ -1,12 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  attachScene,
-  globeCallbacks,
-  goToMyLocation,
-  majorCities,
-  startApp,
-  updateSettings,
-} from "../controller";
+import { attachScene, globeCallbacks, goToMyLocation, majorCities, startApp } from "../controller";
 import type { GlobeScene, Insets } from "../globe/scene";
 import { useStore } from "../store";
 import { initialView } from "../urlState";
@@ -32,7 +25,6 @@ export function App() {
   const notice = useStore((s) => s.notice);
   const place = useStore((s) => s.place);
   const moving = useStore((s) => s.moving);
-  const weatherShown = useStore((s) => s.settings.weather);
   const [announcement, setAnnouncement] = useState("");
 
   useEffect(() => startApp(), []);
@@ -128,19 +120,6 @@ export function App() {
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 12h14" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className="layer-toggle"
-            aria-label="Clouds and rain"
-            aria-pressed={weatherShown}
-            title={weatherShown ? "Hide clouds and rain" : "Show clouds and rain"}
-            onClick={() => updateSettings({ weather: !weatherShown })}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7.5 17h9a3.8 3.8 0 0 0 .6-7.5 5.2 5.2 0 0 0-9.9-1A4.2 4.2 0 0 0 7.5 17z" />
-              <path d="M9 20l-.8 1.6M13 20l-.8 1.6" />
             </svg>
           </button>
           <button

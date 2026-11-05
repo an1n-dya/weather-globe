@@ -1,127 +1,67 @@
 import type { WeatherIcon } from "../weather/wmo";
 
-/** Shapes on a 32-unit square, shared by the static icons and the animated one. */
-export const ICON_COLORS = {
-  sun: "#ffc94d",
-  moon: "#c9d6f2",
-  cloud: "#e8eef7",
-  cloudDark: "#a9b6c9",
-  rain: "#6db8f2",
-  snow: "#dff3ff",
-  bolt: "#ffc94d",
-} as const;
+const SUN = "#ffc94d";
+const MOON = "#c9d6f2";
+const CLOUD = "#e8eef7";
+const CLOUD_DARK = "#a9b6c9";
+const RAIN = "#6db8f2";
+const SNOW = "#dff3ff";
+const BOLT = "#ffc94d";
 
-export const CLOUD_PATH =
-  "M9.5 24.5h14a5.5 5.5 0 0 0 .9-10.9 7.5 7.5 0 0 0-14.3-1.4A6.2 6.2 0 0 0 9.5 24.5z";
-export const MOON_PATH = "M10.5 0.6A8 8 0 1 0 15.4 11 6.6 6.6 0 0 1 10.5 0.6z";
-export const BOLT_PATH = "M17.5 19l-5 7h3.6l-1.6 5 6-7.5h-3.8l2.3-4.5z";
-export const FOG_PATHS = ["M7 25h18", "M10 29h12"];
-export const RAIN_XS = { drizzle: [13, 20], rain: [10, 16, 22] } as const;
-export const FLAKES = [
-  [10, 27],
-  [16, 29],
-  [22, 27],
-] as const;
-
-/** Where the shapes of each icon sit. */
-export interface IconLayout {
-  sun: { cx: number; cy: number; r: number } | null;
-  moon: { cx: number; cy: number; r: number } | null;
-  cloud: { color: string; dy: number } | null;
-  drops: readonly number[];
-  flakes: boolean;
-  bolt: boolean;
-  fog: boolean;
-}
-
-export function iconLayout(icon: WeatherIcon, isDay: boolean): IconLayout {
-  const none: IconLayout = {
-    sun: null,
-    moon: null,
-    cloud: null,
-    drops: [],
-    flakes: false,
-    bolt: false,
-    fog: false,
-  };
-  const c = ICON_COLORS;
-  switch (icon) {
-    case "clear":
-      return isDay
-        ? { ...none, sun: { cx: 16, cy: 16, r: 6.5 } }
-        : { ...none, moon: { cx: 16, cy: 16, r: 8 } };
-    case "partly":
-      return {
-        ...none,
-        sun: isDay ? { cx: 22, cy: 10, r: 4.5 } : null,
-        moon: isDay ? null : { cx: 23, cy: 9, r: 6 },
-        cloud: { color: isDay ? c.cloud : c.cloudDark, dy: 2 },
-      };
-    case "cloudy":
-      return { ...none, cloud: { color: c.cloudDark, dy: 1 } };
-    case "fog":
-      return { ...none, cloud: { color: c.cloudDark, dy: -3 }, fog: true };
-    case "drizzle":
-      return { ...none, cloud: { color: c.cloud, dy: -3 }, drops: RAIN_XS.drizzle };
-    case "rain":
-      return { ...none, cloud: { color: c.cloudDark, dy: -3 }, drops: RAIN_XS.rain };
-    case "snow":
-      return { ...none, cloud: { color: c.cloud, dy: -3 }, flakes: true };
-    case "thunder":
-      return { ...none, cloud: { color: c.cloudDark, dy: -3 }, bolt: true };
-  }
-}
-
-/** The eight short rays around a sun, as line segments. */
-export function sunRays(
-  cx: number,
-  cy: number,
-  r: number,
-): Array<[number, number, number, number]> {
-  return Array.from({ length: 8 }, (_, i) => {
+function sun(cx: number, cy: number, r: number): string {
+  const rays = Array.from({ length: 8 }, (_, i) => {
     const a = (i * Math.PI) / 4;
-    return [
-      cx + Math.cos(a) * (r + 2.2),
-      cy + Math.sin(a) * (r + 2.2),
-      cx + Math.cos(a) * (r + 5),
-      cy + Math.sin(a) * (r + 5),
-    ];
-  });
+    const x1 = cx + Math.cos(a) * (r + 2.2);
+    const y1 = cy + Math.sin(a) * (r + 2.2);
+    const x2 = cx + Math.cos(a) * (r + 5);
+    const y2 = cy + Math.sin(a) * (r + 5);
+    return `<path d="M${x1.toFixed(1)} ${y1.toFixed(1)}L${x2.toFixed(1)} ${y2.toFixed(1)}"/>`;
+  }).join("");
+  return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${SUN}"/><g stroke="${SUN}" stroke-width="2" stroke-linecap="round">${rays}</g>`;
 }
 
-const f = (value: number) => value.toFixed(1);
+function moon(cx: number, cy: number, r: number): string {
+  return `<path transform="translate(${cx - r} ${cy - r}) scale(${r / 8})" d="M10.5 0.6A8 8 0 1 0 15.4 11 6.6 6.6 0 0 1 10.5 0.6z" fill="${MOON}"/>`;
+}
+
+function cloud(color: string, dy = 0): string {
+  return `<path transform="translate(0 ${dy})" d="M9.5 24.5h14a5.5 5.5 0 0 0 .9-10.9 7.5 7.5 0 0 0-14.3-1.4A6.2 6.2 0 0 0 9.5 24.5z" fill="${color}"/>`;
+}
+
+function drops(color: string, xs: number[]): string {
+  return xs
+    .map(
+      (x) =>
+        `<path d="M${x} 24.5l-1.6 4.5" stroke="${color}" stroke-width="2.2" stroke-linecap="round"/>`,
+    )
+    .join("");
+}
+
+function flakes(): string {
+  return [10, 16, 22]
+    .map((x, i) => `<circle cx="${x}" cy="${i === 1 ? 29 : 27}" r="1.7" fill="${SNOW}"/>`)
+    .join("");
+}
 
 function drawing(icon: WeatherIcon, isDay: boolean): string {
-  const layout = iconLayout(icon, isDay);
-  const c = ICON_COLORS;
-  let svg = "";
-  if (layout.sun) {
-    const { cx, cy, r } = layout.sun;
-    const rays = sunRays(cx, cy, r)
-      .map(([x1, y1, x2, y2]) => `<path d="M${f(x1)} ${f(y1)}L${f(x2)} ${f(y2)}"/>`)
-      .join("");
-    svg += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${c.sun}"/><g stroke="${c.sun}" stroke-width="2" stroke-linecap="round">${rays}</g>`;
+  switch (icon) {
+    case "clear":
+      return isDay ? sun(16, 16, 6.5) : moon(16, 16, 8);
+    case "partly":
+      return `${isDay ? sun(22, 10, 4.5) : moon(23, 9, 6)}${cloud(isDay ? CLOUD : CLOUD_DARK, 2)}`;
+    case "cloudy":
+      return cloud(CLOUD_DARK, 1);
+    case "fog":
+      return `${cloud(CLOUD_DARK, -3)}<g stroke="${CLOUD}" stroke-width="2.2" stroke-linecap="round"><path d="M7 25h18"/><path d="M10 29h12"/></g>`;
+    case "drizzle":
+      return `${cloud(CLOUD, -3)}${drops(RAIN, [13, 20])}`;
+    case "rain":
+      return `${cloud(CLOUD_DARK, -3)}${drops(RAIN, [10, 16, 22])}`;
+    case "snow":
+      return `${cloud(CLOUD, -3)}${flakes()}`;
+    case "thunder":
+      return `${cloud(CLOUD_DARK, -3)}<path d="M17.5 19l-5 7h3.6l-1.6 5 6-7.5h-3.8l2.3-4.5z" fill="${BOLT}"/>`;
   }
-  if (layout.moon) {
-    const { cx, cy, r } = layout.moon;
-    svg += `<path transform="translate(${cx - r} ${cy - r}) scale(${r / 8})" d="${MOON_PATH}" fill="${c.moon}"/>`;
-  }
-  if (layout.cloud) {
-    svg += `<path transform="translate(0 ${layout.cloud.dy})" d="${CLOUD_PATH}" fill="${layout.cloud.color}"/>`;
-  }
-  for (const x of layout.drops) {
-    svg += `<path d="M${x} 24.5l-1.6 4.5" stroke="${c.rain}" stroke-width="2.2" stroke-linecap="round"/>`;
-  }
-  if (layout.flakes) {
-    svg += FLAKES.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="1.7" fill="${c.snow}"/>`).join(
-      "",
-    );
-  }
-  if (layout.bolt) svg += `<path d="${BOLT_PATH}" fill="${c.bolt}"/>`;
-  if (layout.fog) {
-    svg += `<g stroke="${c.cloud}" stroke-width="2.2" stroke-linecap="round">${FOG_PATHS.map((d) => `<path d="${d}"/>`).join("")}</g>`;
-  }
-  return svg;
 }
 
 const sources = new Map<string, string>();

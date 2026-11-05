@@ -13,33 +13,15 @@ export interface GlobeView {
   distance: number;
 }
 
-type Easing = (t: number) => number;
-
 interface Flight {
   from: GlobeView;
   dLon: number;
   to: GlobeView;
   start: number;
   duration: number;
-  /** Extra distance at the middle of the flight, for an arc over long trips. */
-  lift: number;
-  ease: Easing;
 }
 
-/** Share of a drag's remaining motion applied per frame at 60 fps. */
-const DAMPING = 0.08;
-
-/**
- * OrbitControls damps per frame, so its glide after a drag would last twice
- * as long at 30 fps as at 60. Scaling the factor by frame time keeps the
- * glide the same length in seconds at any frame rate.
- */
-export function dampingFor(dt: number): number {
-  return Math.min(0.9, 1 - (1 - DAMPING) ** (Math.max(0, dt) * 60));
-}
-
-const easeInOut: Easing = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
-const easeOut: Easing = (t) => 1 - (1 - t) ** 3;
+const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
 
 /**
  * Distance at which a unit sphere just fits a free area of `freeSize` pixels
@@ -54,9 +36,6 @@ export function fitDistance(freeSize: number, height: number, margin = 0.92): nu
 export class GlobeCameraRig {
   private readonly controls: OrbitControls;
   private flight: Flight | null = null;
-  private lastUpdate: number | null = null;
-  /** Counts drags, pinches and wheel turns, so callers can tell when the user took over. */
-  interactions = 0;
 
   constructor(
     private readonly camera: PerspectiveCamera,
@@ -66,13 +45,12 @@ export class GlobeCameraRig {
     const controls = new OrbitControls(camera, dom);
     controls.enablePan = false;
     controls.enableDamping = !reducedMotion;
-    controls.dampingFactor = DAMPING;
+    controls.dampingFactor = 0.08;
     controls.minDistance = MIN_DISTANCE;
     controls.minPolarAngle = Math.PI / 2 - POLE_MARGIN;
     controls.maxPolarAngle = Math.PI / 2 + POLE_MARGIN;
     controls.addEventListener("start", () => {
       this.flight = null;
-      this.interactions++;
     });
     this.controls = controls;
   }
@@ -81,10 +59,6 @@ export class GlobeCameraRig {
     const { x, y, z } = this.camera.position;
     const { lat, lon } = vec3ToLatLon(x, y, z);
     return { lat, lon, distance: this.camera.position.length() };
-  }
-
-  get flying(): boolean {
-    return this.flight !== null;
   }
 
   setMaxDistance(distance: number): void {
@@ -107,18 +81,9 @@ export class GlobeCameraRig {
       lon: target.lon,
       distance: this.clampDistance(target.distance ?? from.distance),
     };
-    const arc = Math.hypot(to.lat - from.lat, lonDelta(from.lon, to.lon));
-    // Long trips rise for an overview on the way, as a plane would.
-    const ceiling = this.controls.maxDistance - Math.max(from.distance, to.distance);
-    const lift = Math.max(0, Math.min(ceiling, (Math.min(arc, 120) / 120) * 1.2));
-    this.startFlight(from, to, 650 + Math.min(arc, 180) * 7, now, lift, easeInOut);
-  }
-
-  /** The opening move: from further out, slowing as it arrives. */
-  arrive(view: GlobeView, fromDistance: number, duration: number, now: number): void {
-    const to = { ...view, distance: this.clampDistance(view.distance) };
-    this.place({ ...to, distance: fromDistance });
-    this.startFlight({ ...to, distance: fromDistance }, to, duration, now, 0, easeOut);
+    const dLon = lonDelta(from.lon, to.lon);
+    const arc = Math.hypot(to.lat - from.lat, dLon);
+    this.startFlight(from, to, 500 + Math.min(arc, 180) * 7, now);
   }
 
   /** Arrow keys: a step sized so it moves the same distance on screen at any zoom. */
@@ -131,7 +96,7 @@ export class GlobeCameraRig {
       lon: from.lon + dLonScreens * step * lonScale,
       distance: from.distance,
     };
-    this.startFlight(from, to, 180, now, 0, easeInOut);
+    this.startFlight(from, to, 180, now);
   }
 
   /** factor < 1 moves closer. Altitude scales, so zooming is even at every height. */
@@ -139,14 +104,11 @@ export class GlobeCameraRig {
     const from = this.view;
     const { lat, lon, distance } = this.flight?.to ?? from;
     const to = { lat, lon, distance: this.clampDistance(1 + (distance - 1) * factor) };
-    this.startFlight(from, to, 220, now, 0, easeOut);
+    this.startFlight(from, to, 180, now);
   }
 
   /** Advances any flight and the orbit controls. */
   update(now: number): void {
-    const dt = this.lastUpdate === null ? 1 / 60 : Math.min(0.25, (now - this.lastUpdate) / 1000);
-    this.lastUpdate = now;
-    this.controls.dampingFactor = dampingFor(dt);
     const distance = this.camera.position.length();
     const altitude = distance - 1;
 
@@ -159,14 +121,13 @@ export class GlobeCameraRig {
     this.controls.zoomSpeed = Math.log(nextDistance / distance) / Math.log(0.95);
 
     if (this.flight) {
-      const { from, to, dLon, start, duration, lift, ease } = this.flight;
-      const raw = Math.min(1, Math.max(0, (now - start) / duration));
-      const t = ease(raw);
+      const { from, to, dLon, start, duration } = this.flight;
+      const raw = Math.min(1, (now - start) / duration);
+      const t = easeInOut(raw);
       this.place({
         lat: from.lat + (to.lat - from.lat) * t,
         lon: from.lon + dLon * t,
-        distance:
-          from.distance + (to.distance - from.distance) * t + lift * Math.sin(Math.PI * raw),
+        distance: from.distance + (to.distance - from.distance) * t,
       });
       if (raw >= 1) this.flight = null;
     }
@@ -182,19 +143,12 @@ export class GlobeCameraRig {
     return (2 * TAN_HALF_FOV * (distance - 1) * 180) / Math.PI;
   }
 
-  private startFlight(
-    from: GlobeView,
-    to: GlobeView,
-    duration: number,
-    now: number,
-    lift: number,
-    ease: Easing,
-  ): void {
+  private startFlight(from: GlobeView, to: GlobeView, duration: number, now: number): void {
     if (this.reducedMotion) {
       this.jumpTo(to);
       return;
     }
-    this.flight = { from, to, dLon: lonDelta(from.lon, to.lon), start: now, duration, lift, ease };
+    this.flight = { from, to, dLon: lonDelta(from.lon, to.lon), start: now, duration };
   }
 
   private clampDistance(distance: number): number {
