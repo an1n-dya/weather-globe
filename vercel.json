@@ -52,7 +52,16 @@
       ]
     },
     {
-      "source": "/(icon-192.png|icon-512.png|icon-maskable-512.png|icon.svg|icon-maskable.svg|og.jpg)",
+      "source": "/icon(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=604800, stale-while-revalidate=2592000"
+        }
+      ]
+    },
+    {
+      "source": "/og.jpg",
       "headers": [
         {
           "key": "Cache-Control",
