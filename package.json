@@ -16,11 +16,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "e2e": "playwright test",
-    "data": "tsx scripts/build-land-mask.ts && tsx scripts/build-regions.ts && tsx scripts/build-cities.ts && tsx scripts/build-icons.ts",
+    "data": "tsx scripts/build-earth.ts && tsx scripts/build-regions.ts && tsx scripts/build-cities.ts && tsx scripts/build-icons.ts",
     "check:reference": "tsx scripts/check-reference.ts"
   },
   "dependencies": {
     "@photostructure/tz-lookup": "^11.7.0",
+    "delaunator": "^5.1.0",
     "fflate": "^0.8.3",
     "geokdbush": "^2.1.0",
     "kdbush": "^4.1.0",
@@ -42,6 +43,7 @@
     "@types/topojson-specification": "^1.0.5",
     "@vitejs/plugin-react": "^6.2.1",
     "d3-geo": "^3.1.2",
+    "jpeg-js": "^0.4.4",
     "topojson-client": "^3.1.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",

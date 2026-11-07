@@ -27,7 +27,7 @@
   },
   "overrides": [
     {
-      "includes": ["src/globe/earthMesh.ts", "src/globe/icosphere.ts", "scripts/**", "tests/**"],
+      "includes": ["src/globe/earthMesh.ts", "src/globe/earthData.ts", "scripts/**", "tests/**"],
       "linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }
     }
   ]

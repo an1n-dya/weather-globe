@@ -379,6 +379,22 @@ export function InfoPanel() {
         <a href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">
           Natural Earth
         </a>
+        {" · "}
+        <a
+          href="https://www.ncei.noaa.gov/products/etopo-global-relief-model"
+          target="_blank"
+          rel="noreferrer"
+        >
+          NOAA ETOPO
+        </a>
+        {" · "}
+        <a
+          href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/"
+          target="_blank"
+          rel="noreferrer"
+        >
+          NASA Blue Marble
+        </a>
       </footer>
     </section>
   );

@@ -19,9 +19,9 @@ import { dataUrl } from "../data";
 import { latLonToVec3, vec3ToLatLon } from "../geo/coords";
 import { sunDirection } from "../geo/sun";
 import { FOV, fitDistance, GlobeCameraRig, type GlobeView } from "./camera";
-import { buildEarthArrays, type EarthArrays, OCEAN_MID } from "./earthMesh";
-import type { EarthRequest } from "./earthWorker";
-import { FREQUENCY_HIGH, FREQUENCY_LOW } from "./icosphere";
+import type { DetailTier } from "./earthData";
+import type { EarthArrays } from "./earthMesh";
+import type { EarthReply, EarthRequest } from "./earthWorker";
 import { CityMarkers, type MarkerCity, type MarkerContent, type MarkerLayout } from "./markers";
 import {
   atmosphereFragment,
@@ -73,28 +73,59 @@ const ZOOM_IN_FACTOR = 0.72;
 const ZOOM_OUT_FACTOR = 1.38;
 const DOUBLE_TAP_ZOOM = 0.45;
 const RETICLE_CLEARANCE_PX = 36;
+/** How long a newly built globe takes to fade in over the one before. */
+const FADE_MS = 450;
+/** The plain ocean shown until the land arrives. */
+const PLACEHOLDER_COLOR = [27, 104, 186, 255] as const;
 
-function prefersLowDetail(): boolean {
+/**
+ * low: about 25,000 faces, for weak phones. medium: about 84,000, for other
+ * touch devices. high: about 175,000, for everything else. ?detail= overrides.
+ */
+export function detailTier(): DetailTier {
   const forced = new URLSearchParams(location.search).get("detail");
-  if (forced) return forced === "low";
+  if (forced === "low" || forced === "medium" || forced === "high") return forced;
   const nav = navigator as Navigator & { deviceMemory?: number };
   const coarse = matchMedia("(pointer: coarse)").matches;
-  return coarse && (navigator.hardwareConcurrency <= 4 || (nav.deviceMemory ?? 8) <= 3);
+  if (coarse && (navigator.hardwareConcurrency <= 4 || (nav.deviceMemory ?? 8) <= 3)) return "low";
+  return coarse ? "medium" : "high";
 }
 
-function buildEarthInWorker(request: EarthRequest): Promise<EarthArrays> {
+/** Builds each tier in a worker, calling back as each is ready. */
+function buildEarthInWorker(
+  request: EarthRequest,
+  onTier: (tier: DetailTier, arrays: EarthArrays) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL("./earthWorker.ts", import.meta.url), { type: "module" });
-    worker.onmessage = ({ data }: MessageEvent<EarthArrays>) => {
-      resolve(data);
-      worker.terminate();
+    let remaining = request.tiers.length;
+    worker.onmessage = ({ data }: MessageEvent<EarthReply>) => {
+      if ("error" in data) {
+        worker.terminate();
+        reject(new Error(data.error));
+        return;
+      }
+      onTier(data.tier, data.arrays);
+      remaining--;
+      if (remaining === 0) {
+        worker.terminate();
+        resolve();
+      }
     };
     worker.onerror = (event) => {
-      reject(new Error(event.message));
       worker.terminate();
+      reject(new Error(event.message || "The globe worker failed"));
     };
-    worker.postMessage(request);
+    worker.postMessage(request, [request.file]);
   });
+}
+
+interface Fade {
+  mesh: Mesh<BufferGeometry, ShaderMaterial>;
+  opacity: { value: number };
+  start: number | null;
+  final: boolean;
+  faces: number;
 }
 
 export class GlobeScene {
@@ -103,6 +134,7 @@ export class GlobeScene {
   private readonly callbacks: GlobeCallbacks;
   private readonly obstacles: () => Element[];
   private insets: Insets;
+  private targetInsets: Insets;
   private readonly renderer: WebGLRenderer;
   private readonly scene = new Scene();
   private readonly camera: PerspectiveCamera;
@@ -113,7 +145,8 @@ export class GlobeScene {
   private readonly lightScale = { value: 1 };
   private readonly lightThreshold = { value: 5 };
   private readonly raycaster = new Raycaster();
-  private readonly lowDetail = prefersLowDetail();
+  private readonly detail = detailTier();
+  private readonly reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   private readonly resizeObserver: ResizeObserver;
   private readonly sunTimer: ReturnType<typeof setInterval>;
   private pixelRatioQuery: MediaQueryList | null = null;
@@ -130,13 +163,16 @@ export class GlobeScene {
   private markerLayout: MarkerLayout = { width: 1, height: 1, area: [0, 0, 1, 1], blocked: [] };
   private lastTapPoint: { lat: number; lon: number } | null = null;
   private lights: Points | null = null;
-  private placeholder: Mesh | null = null;
+  /** The globe on screen, and the next one fading in over it. */
+  private earth: Mesh<BufferGeometry, ShaderMaterial> | null = null;
+  private fades: Fade[] = [];
 
   /** Throws if WebGL is unavailable, so callers can fall back to the panel alone. */
   constructor(options: GlobeSceneOptions) {
     this.container = options.container;
     this.initial = options.initial;
     this.insets = options.insets;
+    this.targetInsets = options.insets;
     this.callbacks = options.callbacks;
     this.obstacles = options.obstacles;
 
@@ -154,8 +190,7 @@ export class GlobeScene {
     this.container.append(dom);
 
     this.camera = new PerspectiveCamera(FOV, 1, 0.02, 60);
-    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    this.rig = new GlobeCameraRig(this.camera, dom, reducedMotion, {
+    this.rig = new GlobeCameraRig(this.camera, dom, this.reducedMotion, {
       wake: this.requestRender,
       tap: this.handleTap,
       doubleTap: this.handleDoubleTap,
@@ -187,13 +222,23 @@ export class GlobeScene {
     this.rig.flyTo({ lat, lon, distance }, performance.now());
   }
 
+  /** Back out to the whole globe. */
+  resetView(lat: number, lon: number): void {
+    this.rig.flyTo({ lat, lon, distance: this.rig.maxDistance }, performance.now());
+  }
+
   zoomBy(factor: number): void {
     this.rig.zoomBy(factor, performance.now());
   }
 
+  /** The parts of the screen covered by the panel or sheet. Changes ease in. */
   setInsets(insets: Insets): void {
-    this.insets = insets;
-    this.resize();
+    this.targetInsets = insets;
+    if (this.reducedMotion || !this.positioned) {
+      this.insets = insets;
+      this.layout();
+    }
+    this.requestRender();
   }
 
   setCityWeather(contentFor: (city: MarkerCity) => MarkerContent | null): void {
@@ -253,6 +298,13 @@ export class GlobeScene {
     document.removeEventListener("visibilitychange", this.handleVisibilityChange);
     this.rig.dispose();
     this.markers.dispose();
+    for (const fade of this.fades) {
+      if (fade.start === null) {
+        fade.mesh.geometry.dispose();
+        fade.mesh.material.dispose();
+      }
+    }
+    this.fades = [];
     for (const object of [...this.scene.children]) this.removeObject(object as Mesh | Points);
     this.renderer.dispose();
     dom.remove();
@@ -271,7 +323,7 @@ export class GlobeScene {
   }
 
   private applyPixelRatio(): void {
-    const ratio = Math.min(window.devicePixelRatio || 1, this.lowDetail ? 1.5 : 2);
+    const ratio = Math.min(window.devicePixelRatio || 1, this.detail === "low" ? 1.5 : 2);
     this.pixelRatioUniform.value = ratio;
     this.renderer.setPixelRatio(ratio);
   }
@@ -289,22 +341,72 @@ export class GlobeScene {
     this.resize();
   };
 
-  private createEarthMaterial(): ShaderMaterial {
-    return new ShaderMaterial({
+  private createEarthMesh(
+    arrays: EarthArrays,
+    opacity = { value: 1 },
+  ): Mesh<BufferGeometry, ShaderMaterial> {
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new BufferAttribute(arrays.positions, 3));
+    geometry.setAttribute("aColor", new BufferAttribute(arrays.colors, 4, true));
+    const material = new ShaderMaterial({
       vertexShader: earthVertex,
       fragmentShader: earthFragment,
-      uniforms: { uSun: this.sunUniform },
+      uniforms: { uSun: this.sunUniform, uOpacity: opacity },
     });
+    return new Mesh(geometry, material);
   }
 
-  /** Plain ocean under the same lighting, so the continents simply appear once they're ready. */
+  /** Plain faceted ocean under the same lighting, so the land simply fades in once it's ready. */
   private addPlaceholder(): void {
-    const geometry = new SphereGeometry(1, 64, 48);
-    const colors = new Float32Array(geometry.getAttribute("position").count * 3);
-    for (let i = 0; i < colors.length; i += 3) colors.set(OCEAN_MID, i);
-    geometry.setAttribute("aColor", new BufferAttribute(colors, 3));
-    this.placeholder = new Mesh(geometry, this.createEarthMaterial());
-    this.scene.add(this.placeholder);
+    const sphere = new SphereGeometry(1, 48, 32).toNonIndexed();
+    const positions = sphere.getAttribute("position").array as Float32Array<ArrayBuffer>;
+    const colors = new Uint8Array((positions.length / 3) * 4);
+    for (let i = 0; i < colors.length; i += 4) colors.set(PLACEHOLDER_COLOR, i);
+    this.earth = this.createEarthMesh({ positions, colors });
+    sphere.dispose();
+    this.scene.add(this.earth);
+  }
+
+  /**
+   * Fades a newly built globe in over the current one. While fading it draws
+   * on top without depth testing; back faces are culled and the globe is
+   * nearly convex, so it still looks right, and nothing pops when it takes over.
+   */
+  private showEarth(arrays: EarthArrays, final: boolean): void {
+    if (this.disposed) return;
+    const opacity = { value: 0 };
+    const mesh = this.createEarthMesh(arrays, opacity);
+    mesh.renderOrder = 1;
+    mesh.material.transparent = true;
+    mesh.material.depthTest = false;
+    this.fades.push({ mesh, opacity, start: null, final, faces: arrays.positions.length / 9 });
+    this.requestRender();
+  }
+
+  /** Advances fades; returns whether one is still running. */
+  private advanceFades(now: number): boolean {
+    const fade = this.fades[0];
+    if (!fade) return false;
+    if (fade.start === null) {
+      fade.start = now;
+      this.scene.add(fade.mesh);
+    }
+    const t = this.reducedMotion ? 1 : Math.min(1, (now - fade.start) / FADE_MS);
+    fade.opacity.value = t * t * (3 - 2 * t);
+    this.dirty = true;
+    if (t < 1) return true;
+
+    const { mesh, final, faces } = fade;
+    mesh.material.transparent = false;
+    mesh.material.depthTest = true;
+    mesh.renderOrder = 0;
+    if (this.earth) this.removeObject(this.earth);
+    this.earth = mesh;
+    this.fades.shift();
+    // Tests and curious people can see what was built.
+    this.container.dataset.faces = String(faces);
+    if (final) this.container.dataset.globe = "ready";
+    return this.fades.length > 0;
   }
 
   private addAtmosphere(): void {
@@ -351,32 +453,29 @@ export class GlobeScene {
   }
 
   private async loadEarth(): Promise<void> {
-    const frequency = this.lowDetail ? FREQUENCY_LOW : FREQUENCY_HIGH;
+    this.container.dataset.globe = "loading";
+    // The light globe first, then the full one, unless light is all this device gets.
+    const tiers: DetailTier[] = this.detail === "low" ? ["low"] : ["low", this.detail];
     try {
-      const response = await fetch(dataUrl(`land-mask-${frequency}.bin`));
+      const response = await fetch(dataUrl("earth.bin"));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const mask = new Uint8Array(await response.arrayBuffer());
+      const file = await response.arrayBuffer();
       if (this.disposed) return;
-
-      const { positions, normals, colors } = await buildEarthInWorker({ frequency, mask }).catch(
-        () => buildEarthArrays(frequency, mask),
-      );
-      if (this.disposed) return;
-
-      const geometry = new BufferGeometry();
-      geometry.setAttribute("position", new BufferAttribute(positions, 3));
-      geometry.setAttribute("normal", new BufferAttribute(normals, 3));
-      geometry.setAttribute("aColor", new BufferAttribute(colors, 3, true));
-      this.scene.add(new Mesh(geometry, this.createEarthMaterial()));
-
-      if (this.placeholder) {
-        this.removeObject(this.placeholder);
-        this.placeholder = null;
+      try {
+        await buildEarthInWorker({ file: file.slice(0), tiers }, (tier, arrays) =>
+          this.showEarth(arrays, tier === tiers.at(-1)),
+        );
+      } catch (error) {
+        if (this.disposed) return;
+        console.warn("Building the globe in a worker failed; building it here instead", error);
+        const { buildOnMainThread } = await import("./earthFallback");
+        const tier = tiers.at(-1) ?? "low";
+        this.showEarth(await buildOnMainThread(file, tier), true);
       }
-      this.requestRender();
     } catch (error) {
-      // The plain sphere stays visible; time and weather are unaffected.
-      console.warn("Could not load land data", error);
+      // The plain ocean stays visible; time and weather are unaffected.
+      console.warn("Could not load the globe's land data", error);
+      this.container.dataset.globe = "failed";
     }
   }
 
@@ -387,7 +486,13 @@ export class GlobeScene {
     this.width = width;
     this.height = height;
     this.renderer.setSize(width, height);
+    this.layout();
+  }
 
+  /** Where the globe sits, given the size and the insets. */
+  private layout(): void {
+    const { width, height } = this;
+    if (width <= 1 || height <= 1) return;
     const { top, right, bottom } = this.insets;
     const freeWidth = Math.max(120, width - right);
     const freeHeight = Math.max(120, height - top - bottom);
@@ -444,6 +549,24 @@ export class GlobeScene {
     this.requestRender();
   }
 
+  /** Eases the insets toward their target; returns whether still moving. */
+  private advanceInsets(): boolean {
+    const target = this.targetInsets;
+    const current = this.insets;
+    const ease = (a: number, b: number) => (Math.abs(b - a) < 0.5 ? b : a + (b - a) * 0.22);
+    const next = {
+      top: ease(current.top, target.top),
+      right: ease(current.right, target.right),
+      bottom: ease(current.bottom, target.bottom),
+    };
+    if (next.top === current.top && next.right === current.right && next.bottom === current.bottom) {
+      return false;
+    }
+    this.insets = next;
+    this.layout();
+    return true;
+  }
+
   private refreshSun = (): void => {
     this.sunUniform.value.set(...sunDirection(new Date()));
     this.requestRender();
@@ -452,7 +575,9 @@ export class GlobeScene {
   private tick = (now: number): void => {
     this.frame = 0;
     if (!this.positioned || this.disposed) return;
-    const animating = this.rig.update(now);
+    const fading = this.advanceFades(now);
+    const shifting = this.advanceInsets();
+    const animating = this.rig.update(now) || fading || shifting;
 
     const moved = this.camera.position.distanceToSquared(this.lastPosition) > 1e-12;
     if (moved) {

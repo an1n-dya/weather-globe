@@ -1,47 +1,66 @@
 /** Colors here are written directly as display values; no tone mapping is applied. */
 
 export const earthVertex = /* glsl */ `
-attribute vec3 aColor;
-varying vec3 vColor;
-varying vec3 vFaceNormal;
-varying vec3 vPosition;
+attribute vec4 aColor;
+varying vec4 vColor;
+varying vec3 vWorld;
 
 void main() {
   vColor = aColor;
-  vFaceNormal = normal;
-  vPosition = position;
+  vWorld = position;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
+/**
+ * Flat facets, lit by the real sun. The face normal comes from screen-space
+ * derivatives of the position, so the mesh needs no normals of its own.
+ * Alpha in the color is gloss: water glints, land stays matte.
+ */
 export const earthFragment = /* glsl */ `
 uniform vec3 uSun;
-varying vec3 vColor;
-varying vec3 vFaceNormal;
-varying vec3 vPosition;
+uniform float uOpacity;
+varying vec4 vColor;
+varying vec3 vWorld;
 
 void main() {
-  vec3 sphereNormal = normalize(vPosition);
-  float sunHeight = dot(sphereNormal, uSun);
-  float day = smoothstep(-0.09, 0.13, sunHeight);
+  vec3 up = normalize(vWorld);
+  vec3 faceNormal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+  if (dot(faceNormal, up) < 0.0) faceNormal = -faceNormal;
+  vec3 toCamera = normalize(cameraPosition - vWorld);
+  vec3 base = vColor.rgb;
+  float gloss = vColor.a;
 
-  float facet = max(dot(normalize(vFaceNormal), uSun), 0.0);
-  vec3 lit = vColor * (0.64 + 0.5 * facet);
-  // Night narrows the color range, so light deserts don't stand out as gray.
-  vec3 nightBase = mix(vColor, vec3(0.32, 0.44, 0.58), 0.55);
-  vec3 night = nightBase * vec3(0.17, 0.21, 0.40) + vec3(0.012, 0.02, 0.05);
+  // Day and night from the sphere, so the terminator is a soft, even band.
+  float sunHeight = dot(up, uSun);
+  float day = smoothstep(-0.11, 0.17, sunHeight);
+
+  // Each facet takes its own light from the sun.
+  float lambert = clamp(dot(faceNormal, uSun), 0.0, 1.0);
+  vec3 lit = base * (0.46 + 0.74 * lambert);
+  // A small glint on the water facets nearest the sun's reflection, and a broad faint sheen.
+  vec3 halfway = normalize(uSun + toCamera);
+  float facing = max(dot(faceNormal, halfway), 0.0);
+  float glint = (pow(facing, 420.0) * 0.22 + pow(facing, 24.0) * 0.05) * gloss * day;
+  lit += vec3(1.0, 0.96, 0.86) * glint;
+
+  // Night: a cool, moonlit version of the day colors, so continents stay readable.
+  // Water goes darker than land, which keeps the coastlines clear.
+  float luma = dot(base, vec3(0.3, 0.55, 0.15));
+  vec3 night = mix(vec3(luma), base, 0.5) * vec3(0.22, 0.27, 0.42) + vec3(0.012, 0.02, 0.05);
+  night *= (0.8 + 0.4 * clamp(dot(faceNormal, toCamera), 0.0, 1.0)) * (1.0 - 0.42 * gloss);
   vec3 color = mix(night, lit, day);
 
   // A warm band along the terminator.
-  float dusk = smoothstep(0.2, 0.0, abs(sunHeight - 0.02));
-  color += vec3(0.15, 0.06, 0.015) * dusk * day;
+  float dusk = smoothstep(0.2, 0.0, abs(sunHeight - 0.03));
+  color += vec3(0.2, 0.08, 0.02) * dusk * (0.3 + 0.7 * day);
 
-  // Soft haze toward the limb.
-  vec3 toCamera = normalize(cameraPosition - vPosition);
-  float rim = pow(1.0 - max(dot(sphereNormal, toCamera), 0.0), 3.0);
-  color = mix(color, vec3(0.58, 0.78, 1.0), rim * (0.06 + 0.2 * day));
+  // Atmosphere toward the limb: blue by day, deep blue at night.
+  float rim = pow(1.0 - max(dot(up, toCamera), 0.0), 3.0);
+  vec3 air = mix(vec3(0.13, 0.2, 0.45), vec3(0.55, 0.78, 1.0), day);
+  color = mix(color, air, rim * (0.3 + 0.3 * day));
 
-  gl_FragColor = vec4(color, 1.0);
+  gl_FragColor = vec4(color, uOpacity);
 }
 `;
 

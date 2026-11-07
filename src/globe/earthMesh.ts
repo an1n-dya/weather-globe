@@ -1,220 +1,326 @@
-import { vec3ToLatLon } from "../geo/coords";
-import { buildIcosphere, faceCount } from "./icosphere";
+import Delaunator from "delaunator";
+import { BIOME, decodeDepth, decodeHeight, type EarthPoints, KIND } from "./earthData";
 
 export interface EarthArrays {
   /** Flat-shaded, non-indexed triangles: three corners per face. */
   positions: Float32Array<ArrayBuffer>;
-  normals: Float32Array<ArrayBuffer>;
+  /** RGBA per corner. Alpha is how glossy the face is: water shines, land doesn't. */
   colors: Uint8Array<ArrayBuffer>;
 }
 
 type Rgb = readonly [number, number, number];
 
-const OCEAN_DEEP: Rgb = [0.17, 0.45, 0.68];
-export const OCEAN_MID: Rgb = [0.21, 0.52, 0.74];
-const OCEAN_SHALLOW: Rgb = [0.33, 0.68, 0.78];
-const SEA_ICE: Rgb = [0.78, 0.88, 0.93];
-const ICE: Rgb = [0.93, 0.96, 0.97];
-const TUNDRA: Rgb = [0.6, 0.65, 0.54];
-const TAIGA: Rgb = [0.33, 0.56, 0.42];
-const TEMPERATE: Rgb = [0.45, 0.68, 0.4];
-const TROPICAL: Rgb = [0.27, 0.6, 0.36];
-const SAVANNA: Rgb = [0.7, 0.7, 0.4];
-const DESERT: Rgb = [0.87, 0.75, 0.5];
+/** Sea level is radius 1. Land sits a step above it, so continents read as raised. */
+export const LAND_BASE = 0.0026;
+const ICE_SHELF_BASE = 0.0018;
+const LAKE_BASE = 0.0012;
+/** Height of the tallest ranges, as a fraction of the radius; about 12 times true scale. */
+const RELIEF = 0.0105;
 
+const PALETTE: Readonly<Record<number, Rgb>> = {
+  [BIOME.ice]: [0.9, 0.95, 0.99],
+  [BIOME.snow]: [0.95, 0.97, 1.0],
+  [BIOME.tundra]: [0.6, 0.64, 0.49],
+  [BIOME.borealForest]: [0.2, 0.5, 0.36],
+  [BIOME.temperateForest]: [0.33, 0.63, 0.29],
+  [BIOME.tropicalForest]: [0.13, 0.56, 0.25],
+  [BIOME.grassland]: [0.6, 0.75, 0.32],
+  [BIOME.savanna]: [0.78, 0.73, 0.35],
+  [BIOME.steppe]: [0.8, 0.69, 0.42],
+  [BIOME.desert]: [0.96, 0.8, 0.47],
+  [BIOME.redDesert]: [0.92, 0.62, 0.36],
+  [BIOME.highland]: [0.62, 0.54, 0.43],
+  [BIOME.none]: [0.45, 0.65, 0.35],
+};
+
+const SEA_ICE: Rgb = [0.76, 0.86, 0.93];
+const LAKE: Rgb = [0.2, 0.62, 0.82];
+const COAST_WATER: Rgb = [0.27, 0.76, 0.85];
+/** Depth in meters, and the sea's color there. */
+const DEPTH_STOPS: ReadonlyArray<readonly [number, Rgb]> = [
+  [0, [0.28, 0.8, 0.86]],
+  [150, [0.21, 0.69, 0.85]],
+  [800, [0.14, 0.53, 0.82]],
+  [2500, [0.1, 0.43, 0.77]],
+  [4500, [0.07, 0.33, 0.68]],
+  [7000, [0.05, 0.22, 0.54]],
+];
+
+function depthColor(depth: number): Rgb {
+  for (let i = 1; i < DEPTH_STOPS.length; i++) {
+    const [d1, c1] = DEPTH_STOPS[i]!;
+    if (depth <= d1) {
+      const [d0, c0] = DEPTH_STOPS[i - 1]!;
+      const t = (depth - d0) / (d1 - d0);
+      return [
+        c0[0] + (c1[0] - c0[0]) * t,
+        c0[1] + (c1[1] - c0[1]) * t,
+        c0[2] + (c1[2] - c0[2]) * t,
+      ];
+    }
+  }
+  return DEPTH_STOPS[DEPTH_STOPS.length - 1]![1];
+}
+
+/** Snow lies lower toward the poles. In meters, for the highest corner of a face. */
+function snowline(lat: number): number {
+  return 4300 - Math.max(0, Math.abs(lat) - 20) * 70;
+}
+
+/** Faces wider than this (in radians, about 130 km) are open water, not a sunlit shallow. */
+const SHALLOW_MAX_EDGE = 0.02;
+
+/** A stable pseudo-random number in [0, 1) for a point, so each face keeps its own shade. */
 function hash3(x: number, y: number, z: number): number {
   const h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
   return h - Math.floor(h);
 }
 
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
+/** How far above sea level a corner sits. */
+function radiusOf(kind: number, value: number): number {
+  switch (kind) {
+    case KIND.land:
+      return 1 + LAND_BASE + RELIEF * (decodeHeight(value) / 7000) ** 0.8;
+    case KIND.lake:
+      return 1 + LAKE_BASE + RELIEF * (decodeHeight(value) / 7000) ** 0.8;
+    case KIND.iceShelf:
+      return 1 + ICE_SHELF_BASE;
+    default:
+      return 1;
+  }
 }
 
-function fade(t: number): number {
-  return t * t * (3 - 2 * t);
+/**
+ * Delaunay triangulation of points on the unit sphere. Projects stereographically
+ * from the first point (chosen to be in empty ocean), triangulates the plane,
+ * and closes the hole with a fan from that point. Every face winds outward.
+ */
+export function triangulateSphere(points: Float64Array, count: number): Uint32Array {
+  const px = points[0]!;
+  const py = points[1]!;
+  const pz = points[2]!;
+  // Two axes at right angles to the projection point.
+  const helper = Math.abs(py) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+  let ax = helper[1]! * pz - helper[2]! * py;
+  let ay = helper[2]! * px - helper[0]! * pz;
+  let az = helper[0]! * py - helper[1]! * px;
+  const al = Math.hypot(ax, ay, az);
+  ax /= al;
+  ay /= al;
+  az /= al;
+  const bx = py * az - pz * ay;
+  const by = pz * ax - px * az;
+  const bz = px * ay - py * ax;
+
+  const coords = new Float64Array((count - 1) * 2);
+  for (let i = 1; i < count; i++) {
+    const x = points[i * 3]!;
+    const y = points[i * 3 + 1]!;
+    const z = points[i * 3 + 2]!;
+    const k = 1 / (1 - (x * px + y * py + z * pz));
+    coords[(i - 1) * 2] = (x * ax + y * ay + z * az) * k;
+    coords[(i - 1) * 2 + 1] = (x * bx + y * by + z * bz) * k;
+  }
+  const { triangles, hull } = new Delaunator(coords);
+  const faces = new Uint32Array(triangles.length + hull.length * 3);
+  for (let i = 0; i < triangles.length; i++) faces[i] = triangles[i]! + 1;
+  let cursor = triangles.length;
+  for (let i = 0; i < hull.length; i++) {
+    faces[cursor++] = 0;
+    faces[cursor++] = hull[(i + 1) % hull.length]! + 1;
+    faces[cursor++] = hull[i]! + 1;
+  }
+
+  // Wind each face outward, whatever convention the plane used.
+  for (let f = 0; f < faces.length; f += 3) {
+    const a = faces[f]! * 3;
+    const b = faces[f + 1]! * 3;
+    const c = faces[f + 2]! * 3;
+    const ux = points[b]! - points[a]!;
+    const uy = points[b + 1]! - points[a + 1]!;
+    const uz = points[b + 2]! - points[a + 2]!;
+    const vx = points[c]! - points[a]!;
+    const vy = points[c + 1]! - points[a + 1]!;
+    const vz = points[c + 2]! - points[a + 2]!;
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    const outward =
+      nx * (points[a]! + points[b]! + points[c]!) +
+      ny * (points[a + 1]! + points[b + 1]! + points[c + 1]!) +
+      nz * (points[a + 2]! + points[b + 2]! + points[c + 2]!);
+    if (outward < 0) {
+      const t = faces[f + 1]!;
+      faces[f + 1] = faces[f + 2]!;
+      faces[f + 2] = t;
+    }
+  }
+  return faces;
 }
 
-/** Smooth 3D value noise in [0, 1]. */
-function noise3(x: number, y: number, z: number): number {
-  const xi = Math.floor(x);
-  const yi = Math.floor(y);
-  const zi = Math.floor(z);
-  const u = fade(x - xi);
-  const v = fade(y - yi);
-  const w = fade(z - zi);
-  return lerp(
-    lerp(
-      lerp(hash3(xi, yi, zi), hash3(xi + 1, yi, zi), u),
-      lerp(hash3(xi, yi + 1, zi), hash3(xi + 1, yi + 1, zi), u),
-      v,
-    ),
-    lerp(
-      lerp(hash3(xi, yi, zi + 1), hash3(xi + 1, yi, zi + 1), u),
-      lerp(hash3(xi, yi + 1, zi + 1), hash3(xi + 1, yi + 1, zi + 1), u),
-      v,
-    ),
-    w,
+function edgeBetween(points: Float64Array, a: number, b: number): number {
+  const dx = points[a * 3]! - points[b * 3]!;
+  const dy = points[a * 3 + 1]! - points[b * 3 + 1]!;
+  const dz = points[a * 3 + 2]! - points[b * 3 + 2]!;
+  return Math.hypot(dx, dy, dz);
+}
+
+function longestEdge(points: Float64Array, corner: number[]): number {
+  return Math.max(
+    edgeBetween(points, corner[0]!, corner[1]!),
+    edgeBetween(points, corner[1]!, corner[2]!),
+    edgeBetween(points, corner[2]!, corner[0]!),
   );
 }
 
-function fractalNoise(x: number, y: number, z: number): number {
-  return (
-    noise3(x * 3, y * 3, z * 3) * 0.55 +
-    noise3(x * 7, y * 7, z * 7) * 0.3 +
-    noise3(x * 15, y * 15, z * 15) * 0.15
-  );
+/** The edge between a face's two land corners, given its one water corner. */
+function shortestLandEdge(points: Float64Array, corner: number[], water: number): number {
+  const [a, b] = corner.filter((v) => v !== water);
+  return a === undefined || b === undefined ? 0 : edgeBetween(points, a, b);
 }
 
-const inside = (v: number, min: number, max: number) => v >= min && v <= max;
+/** Builds the globe from the first `count` points. */
+export function buildEarthArrays(data: EarthPoints, count: number): EarthArrays {
+  const n = Math.min(count, data.header.count);
+  const { positions: points, values, kinds, biomes } = data;
+  const faces = triangulateSphere(points, n);
+  const faceTotal = faces.length / 3;
 
-/** Cosmetic colors chosen by rough climate regions, not real land-cover data. */
-function landColor(lat: number, lon: number, n: number): Rgb {
-  // Bends the region edges, so no straight lines show.
-  const wobble = (n - 0.5) * 34;
-  const la = lat + wobble;
-  const abs = Math.abs(la);
-
-  if (lat < -60 || abs > 76) return ICE;
-  if (inside(lat, 60, 84) && inside(lon, -73, -12)) return ICE; // Greenland
-  if (abs > 64) return TUNDRA;
-  if (abs > 50) return TAIGA;
-
-  const lo = lon + wobble;
-  const arid =
-    (inside(la, 15, 33) && inside(lo, -18, 60)) || // Sahara, Arabia
-    (inside(la, 36, 47) && inside(lo, 52, 106)) || // Central Asia
-    (inside(la, 23, 31) && inside(lo, 60, 74)) || // Thar, Iran
-    (inside(la, -32, -20) && inside(lo, 117, 143)) || // Australian interior
-    (inside(la, -29, -20) && inside(lo, 14, 25)) || // Kalahari, Namib
-    (inside(la, -30, -16) && inside(lo, -72, -67)) || // Atacama
-    (inside(la, 27, 40) && inside(lo, -118, -103)); // US southwest
-  if (arid) return DESERT;
-
-  if (abs < 11) return TROPICAL;
-  if (abs < 17) return n > 0.5 ? SAVANNA : TROPICAL;
-  if (abs < 22) return n > 0.42 ? SAVANNA : TEMPERATE;
-  return TEMPERATE;
-}
-
-function oceanColor(lat: number, n: number, shallow: boolean): Rgb {
-  if (Math.abs(lat) + (n - 0.5) * 8 > 83) return SEA_ICE;
-  if (shallow) return OCEAN_SHALLOW;
-  // A gradual blend: a hard threshold here reads as camouflage patches.
-  const t = Math.max(0, Math.min(1, (n - 0.35) / 0.3));
-  return [
-    lerp(OCEAN_DEEP[0], OCEAN_MID[0], t),
-    lerp(OCEAN_DEEP[1], OCEAN_MID[1], t),
-    lerp(OCEAN_DEEP[2], OCEAN_MID[2], t),
-  ];
-}
-
-export function buildEarthArrays(frequency: number, mask: Uint8Array): EarthArrays {
-  const faceTotal = faceCount(frequency);
-  if (mask.length < Math.ceil(faceTotal / 8)) {
-    throw new Error(`Land mask too small for frequency ${frequency}`);
-  }
-
-  const { vertices, faces } = buildIcosphere(frequency);
-  const vertexTotal = vertices.length / 3;
-  const isLandFace = (f: number) => (mask[f >> 3]! & (1 << (f & 7))) !== 0;
-
-  // A vertex is coastal if only some of the faces around it are land.
-  const landTouches = new Uint8Array(vertexTotal);
-  const allTouches = new Uint8Array(vertexTotal);
-  for (let f = 0; f < faceTotal; f++) {
-    const land = isLandFace(f);
-    for (let c = 0; c < 3; c++) {
-      const v = faces[f * 3 + c]!;
-      allTouches[v]!++;
-      if (land) landTouches[v]!++;
-    }
-  }
-
-  const radii = new Float32Array(vertexTotal);
-  for (let v = 0; v < vertexTotal; v++) {
-    if (landTouches[v] === 0) {
-      radii[v] = 1;
-    } else if (landTouches[v]! < allTouches[v]!) {
-      radii[v] = 1.005;
-    } else {
-      const n = fractalNoise(
-        vertices[v * 3]! + 11,
-        vertices[v * 3 + 1]! + 5,
-        vertices[v * 3 + 2]! + 3,
-      );
-      radii[v] = 1.009 + Math.max(0, n - 0.42) ** 1.5 * 0.08;
-    }
-  }
+  const radii = new Float32Array(n);
+  for (let v = 0; v < n; v++) radii[v] = radiusOf(kinds[v]!, values[v]!);
 
   const positions = new Float32Array(faceTotal * 9);
-  const normals = new Float32Array(faceTotal * 9);
-  const colors = new Uint8Array(faceTotal * 9);
+  const colors = new Uint8Array(faceTotal * 12);
+  const corner = [0, 0, 0];
 
   for (let f = 0; f < faceTotal; f++) {
-    const offset = f * 9;
+    corner[0] = faces[f * 3]!;
+    corner[1] = faces[f * 3 + 1]!;
+    corner[2] = faces[f * 3 + 2]!;
 
-    // Scale the three corners out to their radii.
+    let solid = 0;
+    let lakes = 0;
+    let oceans = 0;
+    let heightSum = 0;
+    let heightMax = 0;
+    let heightMin = Number.POSITIVE_INFINITY;
+    let depthSum = 0;
+    let waterCorner = -1;
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
     for (let c = 0; c < 3; c++) {
-      const v = faces[f * 3 + c]!;
+      const v = corner[c]!;
+      const kind = kinds[v]!;
+      if (kind === KIND.land || kind === KIND.iceShelf) {
+        solid++;
+        const height = decodeHeight(values[v]!);
+        heightSum += height;
+        heightMax = Math.max(heightMax, height);
+        heightMin = Math.min(heightMin, height);
+      } else if (kind === KIND.lake) {
+        lakes++;
+        waterCorner = v;
+      } else {
+        oceans++;
+        depthSum += decodeDepth(values[v]!);
+        waterCorner = v;
+      }
       const r = radii[v]!;
-      positions[offset + c * 3] = vertices[v * 3]! * r;
-      positions[offset + c * 3 + 1] = vertices[v * 3 + 1]! * r;
-      positions[offset + c * 3 + 2] = vertices[v * 3 + 2]! * r;
+      const x = points[v * 3]!;
+      const y = points[v * 3 + 1]!;
+      const z = points[v * 3 + 2]!;
+      positions[f * 9 + c * 3] = x * r;
+      positions[f * 9 + c * 3 + 1] = y * r;
+      positions[f * 9 + c * 3 + 2] = z * r;
+      cx += x;
+      cy += y;
+      cz += z;
     }
-    const ax = positions[offset]!;
-    const ay = positions[offset + 1]!;
-    const az = positions[offset + 2]!;
-    const bx = positions[offset + 3]!;
-    const by = positions[offset + 4]!;
-    const bz = positions[offset + 5]!;
-    const cx = positions[offset + 6]!;
-    const cy = positions[offset + 7]!;
-    const cz = positions[offset + 8]!;
 
-    // The face normal, from the cross product of two edges.
-    const ux = bx - ax;
-    const uy = by - ay;
-    const uz = bz - az;
-    const vx = cx - ax;
-    const vy = cy - ay;
-    const vz = cz - az;
-    const crossX = uy * vz - uz * vy;
-    const crossY = uz * vx - ux * vz;
-    const crossZ = ux * vy - uy * vx;
-    const crossLength = Math.hypot(crossX, crossY, crossZ) || 1;
-    const nx = crossX / crossLength;
-    const ny = crossY / crossLength;
-    const nz = crossZ / crossLength;
+    // Each face keeps its own slightly different shade, so the facets catch the eye.
+    const shade = hash3(cx * 31.7, cy * 31.7, cz * 31.7);
+    const longest = longestEdge(points, corner);
+    // Two land corners usually make land, unless the water corner is far out to
+    // sea: then the face is mostly sea, reaching a small island's shore.
+    let land = solid >= 2;
+    if (solid === 2 && waterCorner >= 0) {
+      const landEdge = shortestLandEdge(points, corner, waterCorner);
+      if (longest > Math.max(0.012, landEdge * 3)) land = false;
+    }
+    let rgb: Rgb;
+    let gloss = 0;
+    let jitter: number;
+    if (land) {
+      // The most common biome among the land corners; ties go to the first.
+      let biome: number = BIOME.none;
+      let best = 0;
+      for (let c = 0; c < 3; c++) {
+        const v = corner[c]!;
+        if (kinds[v] !== KIND.land && kinds[v] !== KIND.iceShelf) continue;
+        let votes = 0;
+        for (let d = 0; d < 3; d++) if (biomes[corner[d]!] === biomes[v]) votes++;
+        if (votes > best) {
+          best = votes;
+          biome = biomes[v]!;
+        }
+      }
+      rgb = PALETTE[biome] ?? PALETTE[BIOME.none]!;
+      const height = heightSum / solid;
+      // Bare, higher ground turns browner before the snowline.
+      if (height > 1800 && biome !== BIOME.ice && biome !== BIOME.snow) {
+        const t = Math.min(1, (height - 1800) / 2800) * 0.45;
+        const rock = PALETTE[BIOME.highland]!;
+        rgb = [
+          rgb[0] + (rock[0] - rgb[0]) * t,
+          rgb[1] + (rock[1] - rgb[1]) * t,
+          rgb[2] + (rock[2] - rgb[2]) * t,
+        ];
+      }
+      // Snow caps on peaks: high, and steep enough not to be a plateau. Dry high
+      // ground such as Tibet stays bare except for its tallest peaks.
+      const length = Math.hypot(cx, cy, cz) || 1;
+      const dry =
+        biome === BIOME.highland ||
+        biome === BIOME.desert ||
+        biome === BIOME.redDesert ||
+        biome === BIOME.steppe;
+      const line = snowline(Math.asin(cy / length) * (180 / Math.PI)) + (dry ? 2000 : 0);
+      const steep = heightMax - heightMin > 500 || heightMax > line + 1400;
+      if (biome === BIOME.snow || (steep && heightMax > line)) rgb = PALETTE[BIOME.snow]!;
+      if (rgb === PALETTE[BIOME.snow] || biome === BIOME.ice) gloss = 70;
+      jitter = 0.9 + shade * 0.17;
+    } else if (lakes > oceans) {
+      rgb = solid > 0 && longest < SHALLOW_MAX_EDGE ? COAST_WATER : LAKE;
+      gloss = 220;
+      jitter = 0.95 + shade * 0.08;
+    } else {
+      const length = Math.hypot(cx, cy, cz) || 1;
+      const lat = Math.asin(cy / length) * (180 / Math.PI);
+      if (lat + (shade - 0.5) * 3 > 79.5) {
+        rgb = SEA_ICE;
+        gloss = 90;
+      } else {
+        // Small faces touching the shore are shallow and bright; the rest follows the depth.
+        rgb =
+          solid > 0 && longest < SHALLOW_MAX_EDGE
+            ? COAST_WATER
+            : depthColor(oceans ? depthSum / oceans : 0);
+        gloss = 255;
+      }
+      jitter = 0.94 + shade * 0.1;
+    }
 
-    const midX = (ax + bx + cx) / 3;
-    const midY = (ay + by + cy) / 3;
-    const midZ = (az + bz + cz) / 3;
-    const { lat, lon } = vec3ToLatLon(midX, midY, midZ);
-    const n = fractalNoise(midX * 1.4 + 2, midY * 1.4 + 7, midZ * 1.4 + 13);
-
-    const land = isLandFace(f);
-    const shallow =
-      landTouches[faces[f * 3]!]! > 0 ||
-      landTouches[faces[f * 3 + 1]!]! > 0 ||
-      landTouches[faces[f * 3 + 2]!]! > 0;
-    const base = land ? landColor(lat, lon, n) : oceanColor(lat, n, shallow);
-    // Small per-face variation is what makes the facets read.
-    const jitter =
-      (land ? 0.93 : 0.97) + hash3(midX * 91, midY * 91, midZ * 91) * (land ? 0.14 : 0.06);
-    const red = Math.min(255, base[0] * jitter * 255);
-    const green = Math.min(255, base[1] * jitter * 255);
-    const blue = Math.min(255, base[2] * jitter * 255);
-
+    const red = Math.min(255, Math.round(rgb[0] * jitter * 255));
+    const green = Math.min(255, Math.round(rgb[1] * jitter * 255));
+    const blue = Math.min(255, Math.round(rgb[2] * jitter * 255));
     for (let c = 0; c < 3; c++) {
-      normals[offset + c * 3] = nx;
-      normals[offset + c * 3 + 1] = ny;
-      normals[offset + c * 3 + 2] = nz;
-      colors[offset + c * 3] = red;
-      colors[offset + c * 3 + 1] = green;
-      colors[offset + c * 3 + 2] = blue;
+      colors[f * 12 + c * 4] = red;
+      colors[f * 12 + c * 4 + 1] = green;
+      colors[f * 12 + c * 4 + 2] = blue;
+      colors[f * 12 + c * 4 + 3] = gloss;
     }
   }
 
-  return { positions, normals, colors };
+  return { positions, colors };
 }

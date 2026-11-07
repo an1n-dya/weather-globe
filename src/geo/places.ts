@@ -1,8 +1,9 @@
 import { around, distance as kmBetween } from "geokdbush";
 import KDBush from "kdbush";
 import { dataUrl } from "../data";
+import { inflate } from "../inflate";
 import { normalizeLon } from "./coords";
-import { inflate, Regions, SURFACE } from "./regions";
+import { Regions, SURFACE } from "./regions";
 
 type PlaceKind = "city" | "near" | "ocean" | "lake" | "remote" | "unknown";
 

@@ -37,6 +37,13 @@ interface Marker {
   y: number;
 }
 
+/** How much room badges need around them, and how many may show, at a camera distance. */
+export function markerDensity(distance: number): { gap: number; limit: number } {
+  const gap = Math.round(Math.max(4, Math.min(30, (distance - 1.3) * 16)));
+  const limit = distance > 2.6 ? 16 : distance > 1.9 ? 26 : 60;
+  return { gap, limit };
+}
+
 /** Below this camera distance, markers also show the city name. */
 const NAMED_DISTANCE = 2.3;
 const TAP_RADIUS_PX = 26;
@@ -107,15 +114,19 @@ export class CityMarkers {
     const distance = camera.position.length();
     const named = distance < NAMED_DISTANCE;
     this.layer.classList.toggle("is-named", named);
-    const halfW = named ? 52 : 30;
+    const halfW = named ? 52 : 32;
     const boxH = named ? 46 : 34;
+    // Zoomed out, fewer badges with more room around each; closer in, more of them.
+    const { gap, limit } = markerDensity(distance);
 
     const taken: Box[] = [...blocked];
-    const horizon = 1 / distance + 0.04;
+    // Keep clear of the limb, where badges would crowd and tilt away.
+    const horizon = 1 / distance + 0.12;
     const cameraDir = camera.position.clone().normalize();
+    let shown = 0;
 
     for (const marker of this.markers) {
-      let show = marker.position.dot(cameraDir) > horizon;
+      let show = shown < limit && marker.position.dot(cameraDir) > horizon;
       if (show) {
         const projected = this.scratch.copy(marker.position).project(camera);
         const x = ((projected.x + 1) / 2) * width;
@@ -135,8 +146,13 @@ export class CityMarkers {
           top >= area[1] &&
           right <= area[2] &&
           bottom <= area[3] &&
-          !taken.some((t) => left < t[2] && right > t[0] && top < t[3] && bottom > t[1]);
-        if (show) taken.push([left, top, right, bottom]);
+          !taken.some(
+            (t) => left - gap < t[2] && right + gap > t[0] && top - gap < t[3] && bottom + gap > t[1],
+          );
+        if (show) {
+          taken.push([left, top, right, bottom]);
+          shown++;
+        }
       }
       if (show !== marker.shown) {
         marker.shown = show;

@@ -24,18 +24,27 @@ Then open http://localhost:5173.
 | `npm test`                | Unit tests                                                                                                                                                                    |
 | `npm run e2e`             | Browser tests in Chromium, Firefox, and WebKit, on desktop and phone viewports, under the production headers and with the weather API mocked; includes an accessibility audit |
 | `npm run check:reference` | Compare time zones against the live API; uses about 110 calls of the free quota                                                                                               |
-| `npm run data`            | Rebuild `public/data`, `src/data` and the icons; downloads GeoNames cities and Natural Earth seas, lakes and regions                                                         |
+| `npm run data`            | Rebuild `public/data`, `src/data` and the icons; downloads GeoNames cities, Natural Earth shapes, ETOPO5 and Blue Marble (about 25 MB, cached in `node_modules/.cache`)       |
 
 Run `npx playwright install chromium firefox webkit` once before `npm run e2e`. To test one browser, add `-- --project=desktop` (or `mobile`, `firefox`, `webkit`, `iphone`). On a Linux machine without a GPU, headless Firefox has no WebGL; run that project headed under a virtual display instead: `xvfb-run -a npx playwright test --project=firefox --headed`.
 
 ## How it fits together
 
-- `src/globe`: the Three.js scene, loaded separately so the time and weather appear first. The mesh is built in a worker (`earthWorker.ts`). The Earth is an icosphere whose faces are marked land or water by a 1-bit mask built ahead of time (`scripts/build-land-mask.ts`). The mask depends on face order, so rebuild it if `icosphere.ts` changes.
+- `src/globe`: the Three.js scene, loaded separately so the time and weather appear first. The globe is built from `public/data/earth.bin`, a list of points written by `scripts/build-earth.ts`: dense along coastlines (about 19 km apart, with a land point and a water point either side of the line), sparse in open ocean and deep interiors, and denser in rough terrain. A worker (`earthWorker.ts`) triangulates them on the sphere (Delaunay, via stereographic projection) and colors each face from its corners: biome from NASA Blue Marble vegetation, height and depth from NOAA ETOPO5. Land is raised in proportion to its height, about 12 times true scale; the sea keeps its depth as color only.
+- Because faces are built from points and nothing is stored per face, there is no face order to keep in step with any mask. Change `scripts/build-earth.ts` (spacing, levels, biome rules) and run `npx tsx scripts/build-earth.ts` to rebuild `public/data/earth.bin`; the app follows.
 - `src/geo`: coordinates, sun position, time zones, and place names. Names come from the nearest GeoNames town, or, away from towns, from `public/data/regions.bin` (`scripts/build-regions.ts`): the sea or lake, the country, and named regions such as deserts and mountain ranges.
 - `src/weather/provider.ts`: the only file that talks to the weather service.
 - `src/controller.ts`: connects the globe, data loading, and the store. `src/ui` is the React interface.
 
-Add `?detail=low` to the URL to force the lighter 32,000-face globe. It is chosen automatically on low-end touch devices.
+The points come coarse to fine, so a prefix of the file is itself a complete, coarser globe. Three detail tiers use that:
+
+| Tier     | Faces    | Used for                                        |
+| -------- | -------- | ----------------------------------------------- |
+| `low`    | ~32,600  | low-end touch devices, and the first quick draw |
+| `medium` | ~90,500  | other phones and tablets                        |
+| `high`   | ~177,400 | everything else                                 |
+
+The light globe appears first and the chosen tier fades in over it. Add `?detail=low`, `?detail=medium` or `?detail=high` to the URL to force a tier.
 
 ## Deploying
 
@@ -49,4 +58,6 @@ The free Open-Meteo API is for non-commercial use only. Adding ads or subscripti
 
 - Weather: [Open-Meteo](https://open-meteo.com/) (CC BY 4.0)
 - Place names: [GeoNames](https://www.geonames.org/) (CC BY 4.0)
-- Land shapes: [Natural Earth](https://www.naturalearthdata.com/) (public domain)
+- Land shapes, lakes, seas and regions: [Natural Earth](https://www.naturalearthdata.com/) (public domain)
+- Elevation and sea depth: [NOAA NCEI ETOPO5](https://www.ncei.noaa.gov/products/etopo-global-relief-model) (public domain)
+- Vegetation, for the biome colors: [NASA Blue Marble Next Generation](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/) (public domain)

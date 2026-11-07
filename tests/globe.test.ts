@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { inflateSync } from "fflate";
 import { PerspectiveCamera } from "three";
 import { describe, expect, it } from "vitest";
 import { latLonToVec3 } from "../src/geo/coords";
@@ -12,8 +13,8 @@ import {
   scaledDistance,
   wheelZoomFactor,
 } from "../src/globe/camera";
-import { buildEarthArrays } from "../src/globe/earthMesh";
-import { buildIcosphere, FREQUENCY_HIGH, FREQUENCY_LOW, faceCount } from "../src/globe/icosphere";
+import { decodeEarth, decodeOctahedral, encodeOctahedral } from "../src/globe/earthData";
+import { buildEarthArrays, triangulateSphere } from "../src/globe/earthMesh";
 import { realRegions } from "./helpers/regions";
 
 describe("land data", () => {
@@ -44,54 +45,141 @@ describe("land data", () => {
   ])("%s is water", (_name, lat, lon) => {
     expect(index.isLand(lat, lon)).toBe(false);
   });
+});
 
-  it.each([FREQUENCY_HIGH, FREQUENCY_LOW])(
-    "mask for frequency %i matches the mesh and places land correctly",
-    (frequency) => {
-      const mask = new Uint8Array(readFileSync(`public/data/land-mask-${frequency}.bin`));
-      const { vertices, faces } = buildIcosphere(frequency);
-      expect(faces.length / 3).toBe(faceCount(frequency));
-      expect(mask.length).toBe(Math.ceil(faceCount(frequency) / 8));
+describe("globe mesh", () => {
+  const points = decodeEarth(inflateSync(new Uint8Array(readFileSync("public/data/earth.bin"))));
+  const { tiers, levels, count } = points.header;
 
-      const faceAt = (lat: number, lon: number) => {
-        const [px, py, pz] = latLonToVec3(lat, lon);
-        let best = 0;
-        let bestDot = -2;
-        for (let f = 0; f < faces.length / 3; f++) {
-          let dot = 0;
-          for (let c = 0; c < 3; c++) {
-            const v = faces[f * 3 + c]! * 3;
-            dot += vertices[v]! * px + vertices[v + 1]! * py + vertices[v + 2]! * pz;
-          }
-          if (dot > bestDot) {
-            bestDot = dot;
-            best = f;
-          }
+  it("orders the points coarse to fine, with three detail tiers", () => {
+    expect(levels.at(-1)).toBe(count);
+    for (let i = 1; i < levels.length; i++) expect(levels[i]!).toBeGreaterThan(levels[i - 1]!);
+    expect(tiers.low).toBeLessThan(tiers.medium);
+    expect(tiers.medium).toBeLessThan(tiers.high);
+    expect(tiers.high).toBe(count);
+    // The light tier stays light, and full detail stays well within a phone's means.
+    expect(tiers.low * 2).toBeLessThan(40_000);
+    expect(count * 2).toBeLessThan(260_000);
+  });
+
+  it("round-trips positions through the octahedral code to within half a kilometer", () => {
+    for (const [lat, lon] of [
+      [0, 0],
+      [89.9, 10],
+      [-89.9, -170],
+      [12.3, 179.99],
+      [-45, -0.01],
+    ] as const) {
+      const [x, y, z] = latLonToVec3(lat, lon);
+      const [u, v] = encodeOctahedral(x, y, z);
+      const [dx, dy, dz] = decodeOctahedral(u, v);
+      const km = Math.acos(Math.min(1, x * dx + y * dy + z * dz)) * 6371;
+      expect(km).toBeLessThan(0.5);
+    }
+  });
+
+  it.each(["low", "medium"] as const)(
+    "triangulates the %s tier into a closed surface, every face wound outward",
+    (tier) => {
+      const n = tiers[tier];
+      const faces = triangulateSphere(points.positions, n);
+      // A triangulated sphere has 2n - 4 faces.
+      expect(faces.length / 3).toBe(2 * n - 4);
+      // Each edge is used once in each direction: no cracks, no flipped faces.
+      const edges = new Set<number>();
+      for (let f = 0; f < faces.length; f += 3) {
+        for (let e = 0; e < 3; e++) {
+          const a = faces[f + e]!;
+          const b = faces[f + ((e + 1) % 3)]!;
+          const key = a * n + b;
+          expect(edges.has(key)).toBe(false);
+          edges.add(key);
         }
-        return (mask[best >> 3]! & (1 << (best & 7))) !== 0;
-      };
-
-      expect(faceAt(40, -100)).toBe(true);
-      expect(faceAt(-25, 135)).toBe(true);
-      expect(faceAt(66, 179.5)).toBe(true);
-      expect(faceAt(0, -150)).toBe(false);
-      expect(faceAt(30, -40)).toBe(false);
+      }
+      for (const key of edges) {
+        const a = Math.floor(key / n);
+        const b = key % n;
+        expect(edges.has(b * n + a)).toBe(true);
+      }
     },
   );
 
-  it("builds an outward-facing mesh with one corner set per face", () => {
-    const mask = new Uint8Array(readFileSync(`public/data/land-mask-${FREQUENCY_LOW}.bin`));
-    const { positions, normals, colors } = buildEarthArrays(FREQUENCY_LOW, mask);
-    const corners = faceCount(FREQUENCY_LOW) * 3;
-    expect(positions.length).toBe(corners * 3);
-    expect(colors.length).toBe(corners * 3);
-    for (let i = 0; i < positions.length; i += 9) {
-      const outward =
-        positions[i]! * normals[i]! +
-        positions[i + 1]! * normals[i + 1]! +
-        positions[i + 2]! * normals[i + 2]!;
-      expect(outward).toBeGreaterThan(0);
-    }
+  describe("at full detail", () => {
+    const { positions, colors } = buildEarthArrays(points, tiers.high);
+    const faceTotal = positions.length / 9;
+
+    /** The gloss of the face the point falls in: 0 is land, 255 the sea. */
+    const glossAt = (lat: number, lon: number): number => {
+      const [px, py, pz] = latLonToVec3(lat, lon);
+      for (let f = 0; f < faceTotal; f++) {
+        const o = f * 9;
+        let inside = true;
+        for (let e = 0; e < 3 && inside; e++) {
+          const a = o + e * 3;
+          const b = o + ((e + 1) % 3) * 3;
+          // The point must be on the inner side of the plane through each edge and the center.
+          const cx = positions[a + 1]! * positions[b + 2]! - positions[a + 2]! * positions[b + 1]!;
+          const cy = positions[a + 2]! * positions[b]! - positions[a]! * positions[b + 2]!;
+          const cz = positions[a]! * positions[b + 1]! - positions[a + 1]! * positions[b]!;
+          inside = cx * px + cy * py + cz * pz >= 0;
+        }
+        if (inside) return colors[f * 12 + 3]!;
+      }
+      throw new Error(`No face at ${lat}, ${lon}`);
+    };
+
+    it("faces outward everywhere", () => {
+      for (let o = 0; o < positions.length; o += 9) {
+        const ux = positions[o + 3]! - positions[o]!;
+        const uy = positions[o + 4]! - positions[o + 1]!;
+        const uz = positions[o + 5]! - positions[o + 2]!;
+        const vx = positions[o + 6]! - positions[o]!;
+        const vy = positions[o + 7]! - positions[o + 1]!;
+        const vz = positions[o + 8]! - positions[o + 2]!;
+        const outward =
+          (uy * vz - uz * vy) * positions[o]! +
+          (uz * vx - ux * vz) * positions[o + 1]! +
+          (ux * vy - uy * vx) * positions[o + 2]!;
+        expect(outward).toBeGreaterThan(0);
+      }
+    });
+
+    it.each([
+      ["the Great Plains", 40, -100],
+      ["central Australia", -25, 135],
+      ["Italy's toe", 38.9, 16.4],
+      ["Italy's heel", 40.4, 18],
+      ["Sicily", 37.5, 14.2],
+      ["Ireland", 53.2, -8],
+      ["England", 52.5, -1.5],
+      ["Honshu", 36.2, 138.2],
+      ["Florida", 28, -81.5],
+      ["Baja California", 27, -113],
+      ["Madagascar", -19, 46.7],
+      ["New Zealand's North Island", -38.5, 176],
+      ["Borneo", 0.5, 114],
+      ["Cuba", 22, -79.5],
+      ["Sri Lanka", 7.8, 80.7],
+    ])("%s is land", (_name, lat, lon) => {
+      expect(glossAt(lat, lon)).toBeLessThan(100);
+    });
+
+    it.each([
+      ["the open Pacific", 0, -150],
+      ["the mid-Atlantic", 30, -40],
+      ["the Red Sea", 20, 38.5],
+      ["the Persian Gulf", 27, 51],
+      ["the Adriatic", 43, 15.5],
+      ["the Gulf of California", 27.8, -111.3],
+      ["the Caribbean", 15, -75],
+      ["the Sea of Japan", 40, 135],
+      ["the Irish Sea", 53.8, -5],
+      ["Lake Superior", 47.7, -87.5],
+      ["Lake Michigan", 43.8, -87],
+      ["Lake Victoria", -1, 33],
+    ])("%s is water", (_name, lat, lon) => {
+      expect(glossAt(lat, lon)).toBeGreaterThan(150);
+    });
   });
 });
 

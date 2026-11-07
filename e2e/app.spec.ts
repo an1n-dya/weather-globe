@@ -442,8 +442,11 @@ test("the globe redraws after the graphics context is lost and restored", async 
   await page.goto("/#20.00,0.00");
   await globeReady(page);
   await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
-  // Long enough for the mesh and night lights to finish loading.
-  await page.waitForTimeout(1500);
+  // The full globe has faded in, and the night lights have had time to arrive.
+  await expect(page.getByTestId("stage")).toHaveAttribute("data-globe", "ready", {
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(800);
 
   // An idle globe draws nothing, so any increase below comes from the restore.
   const before = await draws();
@@ -639,4 +642,19 @@ test("Enter picks the first result even before it arrives, and Escape clears", a
   await search.press("Escape");
   await search.press("Escape");
   await expect(search).toHaveValue("");
+});
+
+test("the globe loads a light version first, then the full one", async ({ page, isMobile }) => {
+  await mockApi(page);
+  await page.goto("/#20.00,0.00");
+  const stage = page.getByTestId("stage");
+  await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
+  const faces = Number(await stage.getAttribute("data-faces"));
+  // Desktops get the full globe; phones the medium one, or the light one when they
+  // report few cores (as an emulated phone on a small test machine does).
+  expect(faces).toBeGreaterThan(isMobile ? 25_000 : 150_000);
+
+  await page.goto("/?detail=low#20.00,0.00");
+  await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
+  expect(Number(await stage.getAttribute("data-faces"))).toBeLessThan(40_000);
 });
