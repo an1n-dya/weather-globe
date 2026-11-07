@@ -48,3 +48,16 @@ export function sunAltitudeDeg(lat: number, lon: number, date: Date): number {
 export function isSunUp(lat: number, lon: number, date: Date): boolean {
   return sunAltitudeDeg(lat, lon, date) > HORIZON_DEG;
 }
+
+/**
+ * Whether the sun stays up all day ("day"), stays down all day ("night"), or
+ * rises and sets (null), from its highest and lowest heights on that date.
+ */
+export function polarState(lat: number, date: Date): "day" | "night" | null {
+  const declination = subsolarPoint(date).lat;
+  const highest = 90 - Math.abs(lat - declination);
+  const lowest = Math.abs(lat + declination) - 90;
+  if (highest < HORIZON_DEG) return "night";
+  if (lowest > HORIZON_DEG) return "day";
+  return null;
+}

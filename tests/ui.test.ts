@@ -67,10 +67,23 @@ describe("shared links", () => {
       "#1,2,0.5",
       "#1,2,3,4",
       "#1,2,x",
+      "#1e1,2",
+      "#0x10,2",
+      "#Infinity,2",
+      "#1,2,1e400",
+      "#%E0%A4%A",
+      "#1,,2",
     ]) {
       expect(parseHash(hash)).toBeNull();
     }
     expect(parseHash("#1,2")).toEqual({ lat: 1, lon: 2 });
+  });
+
+  it("accepts commas that were percent-encoded on the way, and spaces", () => {
+    expect(parseHash("#22.57%2C88.36%2C1.80")).toEqual({ lat: 22.57, lon: 88.36, distance: 1.8 });
+    expect(parseHash("# -33.87 , 151.21 ")).toEqual({ lat: -33.87, lon: 151.21 });
+    // 180 and -180 are the same meridian.
+    expect(parseHash("#0,180")).toEqual({ lat: 0, lon: -180 });
   });
 });
 

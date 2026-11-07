@@ -1,7 +1,7 @@
 /**
- * Turns Natural Earth land polygons into two small binary files:
- *   land-mask-<frequency>.bin  one bit per icosphere face (for the globe mesh)
- *   land-grid.bin              a 720x360 lat/lon bit grid (for "ocean or land?")
+ * Turns Natural Earth land polygons into land-mask-<frequency>.bin: one bit
+ * per icosphere face, for the globe mesh. "Land or water?" for place names
+ * comes from regions.bin instead (scripts/build-regions.ts).
  *
  * d3-geo's equirectangular projection handles the antimeridian and pole
  * clipping; the resulting planar rings are filled with an even-odd scanline.
@@ -126,32 +126,8 @@ function buildFaceMask(bitmap: Uint8Array, frequency: number): Uint8Array {
   return mask;
 }
 
-function buildGrid(bitmap: Uint8Array): Uint8Array {
-  const gridW = 720;
-  const gridH = 360;
-  const grid = new Uint8Array(Math.ceil((gridW * gridH) / 8));
-  for (let y = 0; y < gridH; y++) {
-    const rowStart = Math.floor((y * HEIGHT) / gridH);
-    const rowEnd = Math.floor(((y + 1) * HEIGHT) / gridH);
-    for (let x = 0; x < gridW; x++) {
-      const colStart = Math.floor((x * WIDTH) / gridW);
-      const colEnd = Math.floor(((x + 1) * WIDTH) / gridW);
-      let count = 0;
-      for (let py = rowStart; py < rowEnd; py++) {
-        for (let px = colStart; px < colEnd; px++) count += bitmap[py * WIDTH + px]!;
-      }
-      if (count >= (rowEnd - rowStart) * (colEnd - colStart) * 0.25) {
-        const bit = y * gridW + x;
-        grid[bit >> 3]! |= 1 << (bit & 7);
-      }
-    }
-  }
-  return grid;
-}
-
 const bitmap = rasterizeLand();
 for (const frequency of [FREQUENCY_HIGH, FREQUENCY_LOW]) {
   writeFileSync(join(outDir, `land-mask-${frequency}.bin`), buildFaceMask(bitmap, frequency));
 }
-writeFileSync(join(outDir, "land-grid.bin"), buildGrid(bitmap));
 console.log("land data written to public/data");

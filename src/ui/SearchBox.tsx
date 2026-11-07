@@ -13,6 +13,8 @@ export function SearchBox() {
   const [status, setStatus] = useState<SearchStatus>("idle");
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  /** Enter was pressed before the results arrived; take the first one when they do. */
+  const [pendingEnter, setPendingEnter] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listId = useId();
 
@@ -50,14 +52,29 @@ export function SearchBox() {
     goToNamed(result.lat, result.lon, result.name, result.country);
     setOpen(false);
     setQuery("");
+    setPendingEnter(false);
     inputRef.current?.blur();
   };
 
   const activeResult = results[active];
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs once the awaited results land.
+  useEffect(() => {
+    if (!pendingEnter || status === "searching") return;
+    setPendingEnter(false);
+    const first = results[0];
+    if (status === "done" && first) choose(first);
+  }, [pendingEnter, status, results]);
+
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
-      setOpen(false);
+      // The first press closes the list, the next clears the text.
+      event.preventDefault();
+      if (open && query) setOpen(false);
+      else {
+        setQuery("");
+        setPendingEnter(false);
+      }
     } else if (event.key === "ArrowDown" && results.length) {
       event.preventDefault();
       setOpen(true);
@@ -65,10 +82,16 @@ export function SearchBox() {
     } else if (event.key === "ArrowUp" && results.length) {
       event.preventDefault();
       setActive((i) => (i - 1 + results.length) % results.length);
-    } else if (event.key === "Enter" && activeResult && status === "done") {
-      // While searching, the list still shows results for the previous text.
+    } else if (event.key === "Enter") {
       event.preventDefault();
-      choose(activeResult);
+      // While searching, the list still shows results for the previous text.
+      if (status === "done" && activeResult) choose(activeResult);
+      else if (
+        status === "searching" ||
+        (status === "idle" && query.trim().length >= MIN_QUERY_LENGTH)
+      ) {
+        setPendingEnter(true);
+      }
     }
   };
 
@@ -115,6 +138,7 @@ export function SearchBox() {
                   aria-selected={i === active}
                   className={i === active ? "search-option is-active" : "search-option"}
                   onMouseDown={(event) => event.preventDefault()}
+                  onMouseMove={() => setActive(i)}
                   onClick={() => choose(result)}
                 >
                   <span className="search-name">{result.name}</span>

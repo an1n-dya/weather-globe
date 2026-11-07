@@ -4,7 +4,7 @@
  */
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
-const HOURS_SHOWN = 12;
+const HOURS_SHOWN = 24;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 interface HourForecast {
@@ -46,17 +46,62 @@ export interface SearchResult {
   lon: number;
 }
 
+/** Why a request failed, which decides what the interface says and when to try again. */
+export type WeatherProblem = "offline" | "busy" | "timeout" | "unavailable";
+
+export class WeatherError extends Error {
+  constructor(
+    message: string,
+    readonly problem: WeatherProblem,
+    /** How long the service asked us to wait, from a Retry-After header. */
+    readonly retryAfterMs: number | null = null,
+  ) {
+    super(message);
+    this.name = "WeatherError";
+  }
+}
+
+const MAX_RETRY_AFTER_MS = 10 * 60_000;
+
+/** Retry-After is either a number of seconds or an HTTP date. */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now;
+  if (!Number.isFinite(ms)) return null;
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(1000, ms));
+}
+
+const isOffline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+
 /** Fetches JSON, giving up if the caller aborts or the service stops responding. */
 async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const controller = new AbortController();
+  let timedOut = false;
   const abort = () => controller.abort();
-  const timer = setTimeout(abort, REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    abort();
+  }, REQUEST_TIMEOUT_MS);
   if (signal?.aborted) abort();
   signal?.addEventListener("abort", abort);
+
+  // The caller's own cancellation isn't a failure, so it passes through untouched.
+  const explain = (error: unknown): never => {
+    if (signal?.aborted || error instanceof WeatherError) throw error;
+    if (timedOut) throw new WeatherError("The weather service didn't answer in time", "timeout");
+    if (isOffline()) throw new WeatherError("This device is offline", "offline");
+    throw new WeatherError("Could not reach the weather service", "unavailable");
+  };
+
   try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`Request failed: HTTP ${response.status}`);
-    return await response.json();
+    const response = await fetch(url, { signal: controller.signal }).catch(explain);
+    if (!response.ok) {
+      const retryAfter = parseRetryAfter(response.headers.get("Retry-After"));
+      const problem = response.status === 429 ? "busy" : "unavailable";
+      throw new WeatherError(`Request failed: HTTP ${response.status}`, problem, retryAfter);
+    }
+    return await response.json().catch(explain);
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);

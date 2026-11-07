@@ -8,7 +8,7 @@ import type { GlobeScene, LightPoint } from "./globe/scene";
 import { type Settings, saveSettings, useStore } from "./store";
 import { formatTemperature } from "./ui/format";
 import { iconSrc } from "./ui/icons";
-import { formatHash, parseHash } from "./urlState";
+import { formatHash, parseHash, replaceHash } from "./urlState";
 import { startCityWeather } from "./weather/cityWeather";
 import { ForecastLoader } from "./weather/forecastLoader";
 import { type CityCurrent, fetchForecast } from "./weather/provider";
@@ -59,7 +59,7 @@ function pushCityWeather(): void {
 function settle(lat: number, lon: number, distance: number): void {
   useStore.setState({ lat, lon, distance, moving: false, place: placeAt(lat, lon) });
   forecastLoader.select(lat, lon);
-  history.replaceState(null, "", formatHash(lat, lon, distance));
+  replaceHash(formatHash(lat, lon, distance));
 }
 
 export const globeCallbacks = {
@@ -92,18 +92,32 @@ export function goToNamed(lat: number, lon: number, name: string, region: string
   goTo(lat, lon, scene?.arrivalDistance);
 }
 
+/** What to tell someone whose location couldn't be found, by the reason given. */
+export function locationErrorText(code: number): string {
+  switch (code) {
+    case 1:
+      return "Location access is turned off for this site. Allow it in your browser's settings to use this.";
+    case 3:
+      return "Finding your location took too long. Try again in a moment.";
+    default:
+      return "Your location isn't available right now.";
+  }
+}
+
 export function goToMyLocation(): void {
-  if (!("geolocation" in navigator)) {
+  if (!("geolocation" in navigator) || !window.isSecureContext) {
     useStore.setState({ notice: "Location is not available in this browser." });
     return;
   }
+  useStore.setState({ notice: "Finding your location…", locating: true });
   navigator.geolocation.getCurrentPosition(
     ({ coords }) => {
-      useStore.setState({ notice: null });
+      useStore.setState({ notice: null, locating: false });
+      namedPlace = null;
       goTo(coords.latitude, coords.longitude, scene?.arrivalDistance);
     },
-    () => useStore.setState({ notice: "Could not get your location." }),
-    { maximumAge: 10 * 60_000, timeout: 10_000 },
+    (error) => useStore.setState({ notice: locationErrorText(error.code), locating: false }),
+    { maximumAge: 10 * 60_000, timeout: 12_000 },
   );
 }
 

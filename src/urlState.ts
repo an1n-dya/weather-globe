@@ -1,22 +1,47 @@
+import { normalizeLon } from "./geo/coords";
+
 export interface SharedView {
   lat: number;
   lon: number;
   distance?: number;
 }
 
-/** Reads a view from a hash such as #22.57,88.36,1.80. Invalid input gives null. */
+const NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+
+/**
+ * Reads a view from a hash such as #22.57,88.36,1.80. Invalid input gives null.
+ * Accepts commas that a chat app percent-encoded; anything malformed or out of
+ * range is rejected.
+ */
 export function parseHash(hash: string): SharedView | null {
-  const parts = hash.replace(/^#/, "").split(",");
-  if (parts.length < 2 || parts.length > 3 || parts.some((part) => part.trim() === "")) return null;
-  const [lat, lon, distance] = parts.map(Number) as [number, number, number?];
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  let text = hash.replace(/^#/, "");
+  try {
+    text = decodeURIComponent(text);
+  } catch {
+    return null;
+  }
+  const parts = text.split(",").map((part) => part.trim());
+  if (parts.length < 2 || parts.length > 3 || !parts.every((part) => NUMBER.test(part)))
+    return null;
+  const [lat, rawLon, distance] = parts.map(Number) as [number, number, number?];
+  if (Math.abs(lat) > 90 || Math.abs(rawLon) > 180) return null;
+  const lon = normalizeLon(rawLon);
   if (distance === undefined) return { lat, lon };
-  return Number.isFinite(distance) && distance > 1 ? { lat, lon, distance } : null;
+  return distance > 1 && distance < 100 ? { lat, lon, distance } : null;
 }
 
 export function formatHash(lat: number, lon: number, distance: number): string {
   return `#${lat.toFixed(2)},${lon.toFixed(2)},${distance.toFixed(2)}`;
+}
+
+/** Updates the address without adding to the history. Safari limits how often this may run. */
+export function replaceHash(hash: string): void {
+  if (location.hash === hash) return;
+  try {
+    history.replaceState(history.state, "", hash);
+  } catch {
+    // Over the limit: the next settle writes it.
+  }
 }
 
 /** With no shared link, start at the viewer's longitude, estimated from their clock. */

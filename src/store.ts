@@ -52,6 +52,8 @@ export interface AppState {
   /** The 3D globe could not start, so only search and the panel are available. */
   globeFailed: boolean;
   notice: string | null;
+  /** Waiting for the browser to report the viewer's location. */
+  locating: boolean;
 }
 
 const start = initialView();
@@ -66,6 +68,7 @@ export const useStore = create<AppState>(() => ({
   settings: loadSettings(),
   globeFailed: false,
   notice: null,
+  locating: false,
 }));
 
 /** The forecast only counts when it belongs to the place under the reticle. */

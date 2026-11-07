@@ -74,26 +74,34 @@ void main() {
 
 export const lightsVertex = /* glsl */ `
 attribute float aSize;
+attribute float aMagnitude;
 uniform vec3 uSun;
 uniform float uScale;
-varying float vNight;
+uniform float uThreshold;
+varying float vAlpha;
 
 void main() {
-  vNight = 1.0 - smoothstep(-0.12, 0.04, dot(normalize(position), uSun));
-  gl_PointSize = aSize * uScale;
+  vec3 normal = normalize(position);
+  float night = 1.0 - smoothstep(-0.1, 0.05, dot(normal, uSun));
+  // Facing the camera, rather than the depth buffer, hides the far side and the limb.
+  float facing = smoothstep(0.04, 0.3, dot(normal, normalize(cameraPosition - position)));
+  // Smaller places fade in as the camera comes closer.
+  float shown = smoothstep(uThreshold - 0.7, uThreshold, aMagnitude);
+  vAlpha = night * facing * shown;
+  gl_PointSize = vAlpha > 0.004 ? max(1.0, aSize * uScale) : 0.0;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
 export const lightsFragment = /* glsl */ `
-varying float vNight;
+varying float vAlpha;
 
 void main() {
-  if (vNight <= 0.0) discard;
+  if (vAlpha <= 0.004) discard;
   float d = length(gl_PointCoord - 0.5) * 2.0;
-  float a = smoothstep(1.0, 0.1, d);
-  if (a <= 0.0) discard;
-  gl_FragColor = vec4(1.0, 0.82, 0.48, a * vNight);
+  float core = 1.0 - smoothstep(0.3, 1.0, d);
+  if (core <= 0.0) discard;
+  gl_FragColor = vec4(1.0, 0.85, 0.55, core * vAlpha * 0.95);
 }
 `;
 

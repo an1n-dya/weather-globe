@@ -7,12 +7,16 @@ mkdirSync(SHOTS, { recursive: true });
 
 interface ApiMock {
   forecastCalls: string[];
-  mode: "ok" | "fail";
+  mode: "ok" | "fail" | "busy";
   /** How long the forecast takes to answer. */
   delayMs: number;
+  /** Daily sunrise and sunset values to answer with, as Open-Meteo would. */
+  sun: { sunrise: string[]; sunset: string[] } | null;
+  /** How long a search takes to answer. */
+  searchDelayMs: number;
 }
 
-function forecastBody(url: URL) {
+function forecastBody(url: URL, sun: ApiMock["sun"]) {
   const lat = Number(url.searchParams.get("latitude"));
   const zone = lat > 30 ? "Asia/Tokyo" : "Asia/Kolkata";
   const hours = Array.from({ length: 48 }, (_, i) => {
@@ -38,14 +42,20 @@ function forecastBody(url: URL) {
     },
     daily: {
       time: ["2026-11-04", "2026-11-05"],
-      sunrise: ["2026-11-04T05:42", "2026-11-05T05:43"],
-      sunset: ["2026-11-04T16:58", "2026-11-05T16:57"],
+      sunrise: sun?.sunrise ?? ["2026-11-04T05:42", "2026-11-05T05:43"],
+      sunset: sun?.sunset ?? ["2026-11-04T16:58", "2026-11-05T16:57"],
     },
   };
 }
 
 async function mockApi(page: Page): Promise<ApiMock> {
-  const mock: ApiMock = { forecastCalls: [], mode: "ok", delayMs: 0 };
+  const mock: ApiMock = {
+    forecastCalls: [],
+    mode: "ok",
+    delayMs: 0,
+    sun: null,
+    searchDelayMs: 0,
+  };
   await page.route("https://api.open-meteo.com/**", async (route: Route) => {
     const url = new URL(route.request().url());
     const lats = (url.searchParams.get("latitude") ?? "").split(",");
@@ -63,13 +73,18 @@ async function mockApi(page: Page): Promise<ApiMock> {
     mock.forecastCalls.push(url.search);
     if (mock.delayMs) await new Promise((resolve) => setTimeout(resolve, mock.delayMs));
     if (mock.mode === "fail") {
-      await route.fulfill({ status: 429, json: { error: true } });
+      await route.fulfill({ status: 500, json: { error: true } });
       return;
     }
-    await route.fulfill({ json: forecastBody(url) });
+    if (mock.mode === "busy") {
+      await route.fulfill({ status: 429, headers: { "Retry-After": "30" }, json: { error: true } });
+      return;
+    }
+    await route.fulfill({ json: forecastBody(url, mock.sun) });
   });
-  await page.route("https://geocoding-api.open-meteo.com/**", (route) =>
-    route.fulfill({
+  await page.route("https://geocoding-api.open-meteo.com/**", async (route) => {
+    if (mock.searchDelayMs) await new Promise((resolve) => setTimeout(resolve, mock.searchDelayMs));
+    await route.fulfill({
       json: {
         results: [
           {
@@ -82,8 +97,8 @@ async function mockApi(page: Page): Promise<ApiMock> {
           },
         ],
       },
-    }),
-  );
+    });
+  });
   return mock;
 }
 
@@ -539,4 +554,89 @@ test("there are no accessibility violations", async ({ page }, info) => {
   await expect(page.getByRole("option", { name: /Kathmandu/ })).toBeVisible();
   const open = await new AxeBuilder({ page }).include(".search").analyze();
   expect(open.violations.map((v) => v.id)).toEqual([]);
+});
+
+test("open water and lakes are named, not just called open ocean", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#30.00,-40.00");
+  await globeReady(page);
+  await expect(page.getByTestId("place-name")).toHaveText("North Atlantic Ocean");
+  await page.goto("/#47.70,-87.50,2.00");
+  await page.reload();
+  await globeReady(page);
+  await expect(page.getByTestId("place-name")).toHaveText("Lake Superior");
+});
+
+test("polar night says so instead of showing no sunrise", async ({ page }) => {
+  const mock = await mockApi(page);
+  // What Open-Meteo reports when the sun doesn't rise: midnight for both.
+  mock.sun = { sunrise: ["2026-11-04T00:00", null], sunset: ["2026-11-04T00:00", null] } as never;
+  await page.clock.setFixedTime(new Date("2026-12-10T12:00:00Z"));
+  await page.goto("/#80.00,20.00");
+  await expect(page.getByTestId("polar")).toContainText("Polar night", { timeout: 20_000 });
+});
+
+test("the hourly strip shows whole hours and pages through the day", async ({ page, isMobile }) => {
+  await mockApi(page);
+  await page.goto("/#35.68,139.69");
+  await globeReady(page);
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  if (isMobile) await page.getByRole("button", { name: "Show more" }).click();
+  const strip = page.getByRole("list", { name: "Next 24 hours" });
+  await expect(strip.locator("li")).toHaveCount(24);
+  const hourVisibility = async () =>
+    strip.evaluate((list) => {
+      const box = list.getBoundingClientRect();
+      return [...list.querySelectorAll("li")].map((item) => {
+        const r = item.getBoundingClientRect();
+        if (r.right <= box.left + 1 || r.left >= box.right - 1) return "out";
+        return r.left >= box.left - 1 && r.right <= box.right + 1 ? "whole" : "cut";
+      });
+    });
+  const before = await hourVisibility();
+  expect(before.filter((state) => state === "cut")).toEqual([]);
+  expect(before.filter((state) => state === "whole").length).toBeGreaterThanOrEqual(5);
+  await strip.evaluate((list) => list.scrollBy({ left: list.clientWidth }));
+  await expect
+    .poll(async () => (await hourVisibility()).slice(0, 6).every((state) => state === "out"))
+    .toBe(true);
+  expect((await hourVisibility()).filter((state) => state === "cut")).toEqual([]);
+});
+
+test("a rate-limited weather service says it's busy and when it will retry", async ({ page }) => {
+  const mock = await mockApi(page);
+  mock.mode = "busy";
+  await page.goto("/#35.68,139.69");
+  await expect(page.getByTestId("weather-error")).toContainText("busy", { timeout: 20_000 });
+  await expect(page.getByTestId("weather-error")).toContainText(/Trying again in \d+ s/);
+});
+
+test("double-clicking the globe zooms in there", async ({ page, isMobile }) => {
+  test.skip(isMobile, "Mouse only");
+  await mockApi(page);
+  await page.goto("/#20.00,0.00,3.00");
+  await globeReady(page);
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  const box = await page.locator(".reticle").boundingBox();
+  if (!box) throw new Error("The reticle has no size");
+  await page.mouse.dblclick(box.x + box.width / 2 + 40, box.y + box.height / 2 + 30);
+  await expect
+    .poll(() => Number(new URL(page.url()).hash.split(",")[2]), { timeout: 10_000 })
+    .toBeLessThan(2.2);
+});
+
+test("Enter picks the first result even before it arrives, and Escape clears", async ({ page }) => {
+  const mock = await mockApi(page);
+  mock.searchDelayMs = 800;
+  await page.goto("/#0,-150");
+  await globeReady(page);
+  const search = page.getByRole("combobox", { name: "Search for a place" });
+  await search.fill("Kathm");
+  await search.press("Enter");
+  await expect(page.getByTestId("place-name")).toHaveText("Kathmandu", { timeout: 20_000 });
+
+  await search.fill("Somewhere");
+  await search.press("Escape");
+  await search.press("Escape");
+  await expect(search).toHaveValue("");
 });

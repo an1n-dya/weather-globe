@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { snapToCell, TtlCache } from "../src/weather/cache";
 import { startCityWeather } from "../src/weather/cityWeather";
 import { ForecastLoader, type ForecastState } from "../src/weather/forecastLoader";
-import { type Forecast, fetchCitiesCurrent, parseForecast } from "../src/weather/provider";
+import {
+  type Forecast,
+  fetchCitiesCurrent,
+  fetchForecast,
+  parseForecast,
+  parseRetryAfter,
+  WeatherError,
+} from "../src/weather/provider";
 import { describeWeatherCode, WMO_CODES } from "../src/weather/wmo";
 
 describe("weather codes", () => {
@@ -203,6 +210,39 @@ describe("forecast loader", () => {
     expect(states.at(-1)?.data?.timezone).toBe("cached");
   });
 
+  it("waits as long as a rate-limited service asks", async () => {
+    const { calls, fetcher } = deferredFetcher();
+    const states: ForecastState[] = [];
+    const timers: number[] = [];
+    const loader = new ForecastLoader(fetcher, (s) => states.push(s), {
+      now: () => 0,
+      setTimer: (_callback, ms) => timers.push(ms),
+      clearTimer: () => {},
+    });
+    loader.select(10, 10);
+    calls[0]!.reject(new WeatherError("HTTP 429", "busy", 120_000));
+    await settle();
+    expect(timers).toEqual([120_000]);
+    expect(states.at(-1)).toMatchObject({ status: "error", problem: "busy", retryAt: 120_000 });
+  });
+
+  it("stops retrying while offline and waits to be told it's back", async () => {
+    const { calls, fetcher } = deferredFetcher();
+    const states: ForecastState[] = [];
+    const timers: number[] = [];
+    const loader = new ForecastLoader(fetcher, (s) => states.push(s), {
+      setTimer: (_callback, ms) => timers.push(ms),
+      clearTimer: () => {},
+    });
+    loader.select(10, 10);
+    calls[0]!.reject(new WeatherError("offline", "offline"));
+    await settle();
+    expect(timers).toEqual([]);
+    expect(states.at(-1)).toMatchObject({ status: "error", problem: "offline", retryAt: null });
+    loader.retryNow();
+    expect(calls).toHaveLength(2);
+  });
+
   it("does not refetch while a request for the same cell is running", () => {
     const { calls, fetcher } = deferredFetcher();
     const loader = new ForecastLoader(fetcher, () => {});
@@ -242,9 +282,9 @@ describe("forecast parsing", () => {
 
   it("starts the hourly strip at the current local hour", () => {
     const forecast = parseForecast(raw);
-    expect(forecast.hourly).toHaveLength(12);
+    expect(forecast.hourly).toHaveLength(24);
     expect(forecast.hourly[0]?.time).toBe("2026-11-04T13:00");
-    expect(forecast.hourly[11]?.time).toBe("2026-11-05T00:00");
+    expect(forecast.hourly[23]?.time).toBe("2026-11-05T12:00");
     expect(forecast.current.isDay).toBe(true);
     expect(forecast.sunrise).toBe("2026-11-04T05:42");
   });
@@ -305,7 +345,7 @@ describe("forecast parsing", () => {
       },
     });
     expect(gappy.hourly.map((h) => h.time)).not.toContain("2026-11-04T14:00");
-    expect(gappy.hourly).toHaveLength(12);
+    expect(gappy.hourly).toHaveLength(24);
   });
 
   it("treats a missing or wrong-day sunrise as none", () => {
@@ -315,6 +355,69 @@ describe("forecast parsing", () => {
     });
     expect(polar.sunrise).toBeNull();
     expect(polar.sunset).toBeNull();
+  });
+});
+
+describe("request errors", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reads Retry-After as seconds or a date, within limits", () => {
+    expect(parseRetryAfter("30")).toBe(30_000);
+    expect(parseRetryAfter("0")).toBe(1000);
+    expect(parseRetryAfter("99999")).toBe(600_000);
+    expect(
+      parseRetryAfter("Sat, 07 Nov 2026 10:01:00 GMT", Date.parse("2026-11-07T10:00:00Z")),
+    ).toBe(60_000);
+    expect(parseRetryAfter("soon")).toBeNull();
+    expect(parseRetryAfter(null)).toBeNull();
+  });
+
+  it("tells a rate limit apart from other failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 429, headers: { "Retry-After": "45" } })),
+    );
+    const error = await fetchForecast(1, 2).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WeatherError);
+    expect(error).toMatchObject({ problem: "busy", retryAfterMs: 45_000 });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 503 })),
+    );
+    expect(await fetchForecast(1, 2).catch((e: unknown) => e)).toMatchObject({
+      problem: "unavailable",
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    expect(await fetchForecast(1, 2).catch((e: unknown) => e)).toMatchObject({
+      problem: "unavailable",
+    });
+  });
+
+  it("passes the caller's own cancellation through untouched", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
+          }),
+      ),
+    );
+    const pending = fetchForecast(1, 2, controller.signal).catch((e: unknown) => e);
+    controller.abort();
+    const error = await pending;
+    expect(error).not.toBeInstanceOf(WeatherError);
+    expect((error as DOMException).name).toBe("AbortError");
   });
 });
 
@@ -378,6 +481,27 @@ describe("city weather refresh", () => {
     stop?.();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("ignores saved weather that is damaged or for other cities", async () => {
+    store.set(
+      "weather-globe.city-weather.v1",
+      JSON.stringify({ fetchedAt: Date.now(), keys: ["1,2"], rows: [{ temp: "warm" }] }),
+    );
+    const onData = vi.fn();
+    stop = startCityWeather(CITIES, onData);
+    expect(onData).not.toHaveBeenCalledWith([{ temp: "warm" }]);
+    stop();
+    store.set("weather-globe.city-weather.v1", "{not json");
+    stop = startCityWeather(CITIES, vi.fn());
+    store.set(
+      "weather-globe.city-weather.v1",
+      JSON.stringify({ fetchedAt: Date.now(), keys: ["9,9"], rows: ROWS }),
+    );
+    const other = vi.fn();
+    stop = startCityWeather(CITIES, other);
+    expect(other).not.toHaveBeenCalledWith(ROWS);
+    await vi.advanceTimersByTimeAsync(0);
   });
 
   it("shows recently saved weather without a request", () => {

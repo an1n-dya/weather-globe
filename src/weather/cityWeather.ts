@@ -1,4 +1,4 @@
-import { type CityCurrent, fetchCitiesCurrent } from "./provider";
+import { type CityCurrent, fetchCitiesCurrent, WeatherError } from "./provider";
 
 const STORAGE_KEY = "weather-globe.city-weather.v1";
 const REFRESH_MS = 60 * 60_000;
@@ -17,14 +17,32 @@ interface Saved {
 
 const cityKey = (city: { lat: number; lon: number }) => `${city.lat},${city.lon}`;
 
+const isRow = (row: unknown): row is CityCurrent | null =>
+  row === null ||
+  (typeof row === "object" &&
+    Number.isFinite((row as CityCurrent).temp) &&
+    Number.isFinite((row as CityCurrent).code));
+
+/** Saved weather only counts if it is recent, for the same cities, and well formed. */
 function readSaved(keys: string[]): Saved | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const saved = JSON.parse(raw) as Saved;
-    const matches =
-      saved.keys?.length === keys.length && saved.keys.every((key, i) => key === keys[i]);
-    return matches && Date.now() - saved.fetchedAt < MAX_SAVED_AGE_MS ? saved : null;
+    const saved = JSON.parse(raw) as Partial<Saved> | null;
+    if (
+      !saved ||
+      typeof saved.fetchedAt !== "number" ||
+      !Array.isArray(saved.keys) ||
+      !Array.isArray(saved.rows) ||
+      saved.keys.length !== keys.length ||
+      saved.rows.length !== keys.length ||
+      !saved.keys.every((key, i) => key === keys[i]) ||
+      !saved.rows.every(isRow)
+    ) {
+      return null;
+    }
+    const age = Date.now() - saved.fetchedAt;
+    return age >= 0 && age < MAX_SAVED_AGE_MS ? (saved as Saved) : null;
   } catch {
     return null;
   }
@@ -68,8 +86,10 @@ export function startCityWeather(
       failures = 0;
       writeSaved({ fetchedAt, keys, rows });
       if (!stopped) onData(rows);
-    } catch {
-      nextAttemptAt = Date.now() + Math.min(RETRY_BASE_MS * 2 ** failures, RETRY_MAX_MS);
+    } catch (error) {
+      const backoff = Math.min(RETRY_BASE_MS * 2 ** failures, RETRY_MAX_MS);
+      const asked = error instanceof WeatherError ? (error.retryAfterMs ?? 0) : 0;
+      nextAttemptAt = Date.now() + Math.max(backoff, asked);
       failures++;
     } finally {
       inFlight = false;

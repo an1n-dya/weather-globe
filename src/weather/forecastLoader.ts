@@ -1,5 +1,5 @@
 import { snapToCell, TtlCache } from "./cache";
-import type { Forecast } from "./provider";
+import { type Forecast, WeatherError, type WeatherProblem } from "./provider";
 
 type ForecastStatus = "idle" | "loading" | "ready" | "error";
 
@@ -11,6 +11,8 @@ export interface ForecastState {
   fetchedAt: number | null;
   /** When the next automatic attempt happens after a failure. */
   retryAt: number | null;
+  /** What went wrong, after a failure. */
+  problem: WeatherProblem | null;
 }
 
 export const IDLE_FORECAST: ForecastState = {
@@ -19,6 +21,7 @@ export const IDLE_FORECAST: ForecastState = {
   data: null,
   fetchedAt: null,
   retryAt: null,
+  problem: null,
 };
 
 const TTL_MS = 15 * 60_000;
@@ -110,6 +113,7 @@ export class ForecastLoader {
         data: entry.value,
         fetchedAt: entry.fetchedAt,
         retryAt: null,
+        problem: null,
       });
       return;
     }
@@ -120,6 +124,7 @@ export class ForecastLoader {
       data: entry?.value ?? null,
       fetchedAt: entry?.fetchedAt ?? null,
       retryAt: null,
+      problem: null,
     });
 
     const generation = ++this.generation;
@@ -139,21 +144,30 @@ export class ForecastLoader {
           data: forecast,
           fetchedAt: saved.fetchedAt,
           retryAt: null,
+          problem: null,
         });
       },
-      () => {
+      (error: unknown) => {
         if (generation !== this.generation || controller.signal.aborted) return;
         this.inFlight = false;
-        const delay = Math.min(BACKOFF_BASE_MS * 2 ** this.attempts, BACKOFF_MAX_MS);
+        const problem = error instanceof WeatherError ? error.problem : "unavailable";
+        const backoff = Math.min(BACKOFF_BASE_MS * 2 ** this.attempts, BACKOFF_MAX_MS);
+        // The service's own Retry-After wins when it asks for longer.
+        const asked = error instanceof WeatherError ? (error.retryAfterMs ?? 0) : 0;
+        const delay = Math.max(backoff, asked);
         this.attempts++;
         const stale = this.cache.get(cell.key);
+        // Offline, retrying is pointless; the "online" event calls retryNow instead.
+        const offline = problem === "offline";
         this.publish({
           key: cell.key,
           status: "error",
           data: stale?.value ?? null,
           fetchedAt: stale?.fetchedAt ?? null,
-          retryAt: this.now() + delay,
+          retryAt: offline ? null : this.now() + delay,
+          problem,
         });
+        if (offline) return;
         this.retryHandle = this.setTimer(() => {
           this.retryHandle = null;
           this.load();

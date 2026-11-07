@@ -64,13 +64,14 @@ export interface LightPoint {
   pop: number;
 }
 
-const SETTLE_MS = 400;
+/** How long the view must stay still before it counts as settled. */
+const SETTLE_MS = 350;
 const SUN_REFRESH_MS = 30_000;
-const LIGHT_RADIUS = 1.036;
-const TAP_MAX_TRAVEL_PX = 6;
-const TAP_MAX_MS = 400;
+/** Just above the land, so lights aren't buried in it. */
+const LIGHT_RADIUS = 1.004;
 const ZOOM_IN_FACTOR = 0.72;
 const ZOOM_OUT_FACTOR = 1.38;
+const DOUBLE_TAP_ZOOM = 0.45;
 const RETICLE_CLEARANCE_PX = 36;
 
 function prefersLowDetail(): boolean {
@@ -108,23 +109,26 @@ export class GlobeScene {
   private readonly rig: GlobeCameraRig;
   private readonly markers: CityMarkers;
   private readonly sunUniform = { value: new Vector3(0, 0, 1) };
+  private readonly pixelRatioUniform = { value: 1 };
   private readonly lightScale = { value: 1 };
+  private readonly lightThreshold = { value: 5 };
   private readonly raycaster = new Raycaster();
   private readonly lowDetail = prefersLowDetail();
-  private readonly pixelRatio: number;
   private readonly resizeObserver: ResizeObserver;
+  private readonly sunTimer: ReturnType<typeof setInterval>;
+  private pixelRatioQuery: MediaQueryList | null = null;
   private frame = 0;
+  private settleTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private dirty = true;
   private positioned = false;
+  private settleOnFirstFrame = false;
   private readonly lastPosition = new Vector3();
-  private lastMoveAt = Number.NEGATIVE_INFINITY;
   private settled = false;
-  private lastSunAt = Number.NEGATIVE_INFINITY;
   private width = 1;
   private height = 1;
   private markerLayout: MarkerLayout = { width: 1, height: 1, area: [0, 0, 1, 1], blocked: [] };
-  private tapStart: { x: number; y: number; time: number; pointerId: number } | null = null;
+  private lastTapPoint: { lat: number; lon: number } | null = null;
   private lights: Points | null = null;
   private placeholder: Mesh | null = null;
 
@@ -137,9 +141,8 @@ export class GlobeScene {
     this.obstacles = options.obstacles;
 
     this.renderer = new WebGLRenderer({ antialias: true, alpha: true });
-    this.pixelRatio = Math.min(window.devicePixelRatio || 1, this.lowDetail ? 1.5 : 2);
-    this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setClearColor(0x000000, 0);
+    this.applyPixelRatio();
 
     const dom = this.renderer.domElement;
     dom.tabIndex = 0;
@@ -152,7 +155,11 @@ export class GlobeScene {
 
     this.camera = new PerspectiveCamera(FOV, 1, 0.02, 60);
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    this.rig = new GlobeCameraRig(this.camera, dom, reducedMotion);
+    this.rig = new GlobeCameraRig(this.camera, dom, reducedMotion, {
+      wake: this.requestRender,
+      tap: this.handleTap,
+      doubleTap: this.handleDoubleTap,
+    });
     this.markers = new CityMarkers(options.markerLayer, options.cities);
 
     this.addPlaceholder();
@@ -160,15 +167,15 @@ export class GlobeScene {
     this.addStars();
     void this.loadEarth();
 
-    dom.addEventListener("pointerdown", this.handlePointerDown);
-    dom.addEventListener("pointerup", this.handlePointerUp);
-    dom.addEventListener("pointercancel", this.handlePointerCancel);
     dom.addEventListener("keydown", this.handleKeyDown);
     dom.addEventListener("webglcontextrestored", this.handleContextRestored);
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
+    this.sunTimer = setInterval(this.refreshSun, SUN_REFRESH_MS);
+    this.refreshSun();
+    this.watchPixelRatio();
     this.resize();
-    this.frame = requestAnimationFrame(this.tick);
   }
 
   /** A closer view for arriving at a named place; never zooms back out. */
@@ -192,6 +199,7 @@ export class GlobeScene {
   setCityWeather(contentFor: (city: MarkerCity) => MarkerContent | null): void {
     this.markers.setContent(contentFor);
     this.dirty = true;
+    this.requestRender();
   }
 
   setLights(points: ReadonlyArray<LightPoint>): void {
@@ -199,36 +207,50 @@ export class GlobeScene {
 
     const positions = new Float32Array(points.length * 3);
     const sizes = new Float32Array(points.length);
+    const magnitudes = new Float32Array(points.length);
     points.forEach((point, i) => {
       positions.set(latLonToVec3(point.lat, point.lon, LIGHT_RADIUS), i * 3);
-      sizes[i] = Math.min(4.2, 0.9 + Math.max(0, Math.log10(point.pop) - 4.2) * 1.2);
+      const magnitude = Math.log10(Math.max(point.pop, 1000));
+      magnitudes[i] = magnitude;
+      sizes[i] = Math.min(2.6, 0.9 + Math.max(0, magnitude - 4.2) * 0.62);
     });
     const geometry = new BufferGeometry();
     geometry.setAttribute("position", new BufferAttribute(positions, 3));
     geometry.setAttribute("aSize", new BufferAttribute(sizes, 1));
+    geometry.setAttribute("aMagnitude", new BufferAttribute(magnitudes, 1));
     const material = new ShaderMaterial({
       vertexShader: lightsVertex,
       fragmentShader: lightsFragment,
-      uniforms: { uSun: this.sunUniform, uScale: this.lightScale },
+      uniforms: {
+        uSun: this.sunUniform,
+        uScale: this.lightScale,
+        uThreshold: this.lightThreshold,
+      },
       transparent: true,
       depthWrite: false,
+      // Hidden by facing away from the camera instead, so mountains near the limb can't swallow them.
+      depthTest: false,
       blending: AdditiveBlending,
     });
     this.lights = new Points(geometry, material);
+    this.lights.renderOrder = 2;
     this.scene.add(this.lights);
     this.dirty = true;
+    this.requestRender();
   }
 
   dispose(): void {
     this.disposed = true;
     cancelAnimationFrame(this.frame);
+    this.frame = 0;
+    if (this.settleTimer !== null) clearTimeout(this.settleTimer);
+    clearInterval(this.sunTimer);
+    this.pixelRatioQuery?.removeEventListener("change", this.handlePixelRatioChange);
     this.resizeObserver.disconnect();
     const dom = this.renderer.domElement;
-    dom.removeEventListener("pointerdown", this.handlePointerDown);
-    dom.removeEventListener("pointerup", this.handlePointerUp);
-    dom.removeEventListener("pointercancel", this.handlePointerCancel);
     dom.removeEventListener("keydown", this.handleKeyDown);
     dom.removeEventListener("webglcontextrestored", this.handleContextRestored);
+    document.removeEventListener("visibilitychange", this.handleVisibilityChange);
     this.rig.dispose();
     this.markers.dispose();
     for (const object of [...this.scene.children]) this.removeObject(object as Mesh | Points);
@@ -236,11 +258,36 @@ export class GlobeScene {
     dom.remove();
   }
 
+  /** Schedules one frame; frames keep coming only while something moves. */
+  private requestRender = (): void => {
+    this.dirty = true;
+    if (!this.frame && !this.disposed) this.frame = requestAnimationFrame(this.tick);
+  };
+
   private removeObject(object: Mesh | Points): void {
     this.scene.remove(object);
     object.geometry.dispose();
     (object.material as Material).dispose();
   }
+
+  private applyPixelRatio(): void {
+    const ratio = Math.min(window.devicePixelRatio || 1, this.lowDetail ? 1.5 : 2);
+    this.pixelRatioUniform.value = ratio;
+    this.renderer.setPixelRatio(ratio);
+  }
+
+  /** Moving the window to another screen, or zooming the page, changes the pixel ratio. */
+  private watchPixelRatio(): void {
+    this.pixelRatioQuery?.removeEventListener("change", this.handlePixelRatioChange);
+    this.pixelRatioQuery = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    this.pixelRatioQuery.addEventListener("change", this.handlePixelRatioChange);
+  }
+
+  private handlePixelRatioChange = (): void => {
+    this.applyPixelRatio();
+    this.watchPixelRatio();
+    this.resize();
+  };
 
   private createEarthMaterial(): ShaderMaterial {
     return new ShaderMaterial({
@@ -296,7 +343,7 @@ export class GlobeScene {
     const material = new ShaderMaterial({
       vertexShader: starsVertex,
       fragmentShader: starsFragment,
-      uniforms: { uPixelRatio: { value: this.pixelRatio } },
+      uniforms: { uPixelRatio: this.pixelRatioUniform },
       transparent: true,
       depthWrite: false,
     });
@@ -326,7 +373,7 @@ export class GlobeScene {
         this.removeObject(this.placeholder);
         this.placeholder = null;
       }
-      this.dirty = true;
+      this.requestRender();
     } catch (error) {
       // The plain sphere stays visible; time and weather are unaffected.
       console.warn("Could not load land data", error);
@@ -392,46 +439,90 @@ export class GlobeScene {
       });
       // Arriving here isn't a move, so the first frame settles straight away.
       this.lastPosition.copy(this.camera.position);
+      this.settleOnFirstFrame = true;
     }
-    this.dirty = true;
+    this.requestRender();
   }
 
+  private refreshSun = (): void => {
+    this.sunUniform.value.set(...sunDirection(new Date()));
+    this.requestRender();
+  };
+
   private tick = (now: number): void => {
-    this.frame = requestAnimationFrame(this.tick);
-    if (!this.positioned) return;
-    this.rig.update(now);
+    this.frame = 0;
+    if (!this.positioned || this.disposed) return;
+    const animating = this.rig.update(now);
 
-    if (now - this.lastSunAt > SUN_REFRESH_MS) {
-      this.lastSunAt = now;
-      this.sunUniform.value.set(...sunDirection(new Date()));
-      this.dirty = true;
-    }
-
-    const moved = this.camera.position.distanceToSquared(this.lastPosition) > 1e-10;
+    const moved = this.camera.position.distanceToSquared(this.lastPosition) > 1e-12;
     if (moved) {
       this.lastPosition.copy(this.camera.position);
-      this.lastMoveAt = now;
       this.settled = false;
       this.dirty = true;
+      if (this.settleTimer !== null) {
+        clearTimeout(this.settleTimer);
+        this.settleTimer = null;
+      }
       this.callbacks.onMove(this.rig.view);
-    } else if (!this.settled && now - this.lastMoveAt >= SETTLE_MS) {
-      this.settled = true;
-      this.callbacks.onSettle(this.rig.view);
+    }
+    if (this.settleOnFirstFrame) {
+      this.settleOnFirstFrame = false;
+      if (!moved) this.settle();
+    }
+    if (!animating && !this.rig.interacting && !this.settled && this.settleTimer === null) {
+      this.settleTimer = setTimeout(this.settle, SETTLE_MS);
     }
 
-    // Drawing only on change keeps an idle globe from draining a battery.
     if (this.dirty) {
       this.dirty = false;
       const altitude = this.camera.position.length() - 1;
-      this.lightScale.value = this.pixelRatio * Math.min(2.4, 0.75 + 0.55 / altitude);
+      const ratio = this.pixelRatioUniform.value;
+      this.lightScale.value = ratio * Math.min(1.6, 0.8 + 0.3 / Math.max(0.05, altitude));
+      // Far away only the larger cities glow; towns join in closer up.
+      this.lightThreshold.value = Math.min(5.6, Math.max(4.1, 4.1 + altitude * 0.75));
       this.markers.update(this.camera, this.markerLayout);
       this.renderer.render(this.scene, this.camera);
     }
+    if (animating) this.requestRender();
+  };
+
+  private settle = (): void => {
+    this.settleTimer = null;
+    if (this.settled || this.rig.interacting || this.disposed) return;
+    this.settled = true;
+    this.callbacks.onSettle(this.rig.view);
   };
 
   /** Phones can drop the GPU context in the background; a restored canvas starts out blank. */
   private handleContextRestored = (): void => {
-    this.dirty = true;
+    this.requestRender();
+  };
+
+  private handleVisibilityChange = (): void => {
+    // The sun kept moving while the page was hidden.
+    if (document.visibilityState === "visible") this.refreshSun();
+  };
+
+  private handleTap = (x: number, y: number): void => {
+    const city = this.markers.pick(x, y);
+    if (city) {
+      this.lastTapPoint = { lat: city.lat, lon: city.lon };
+      this.callbacks.onTapCity(city);
+      return;
+    }
+    const point = this.intersectGlobe(x, y);
+    this.lastTapPoint = point;
+    if (point) this.callbacks.onTapPoint(point.lat, point.lon);
+  };
+
+  /** The first tap already set off a flight there; the second zooms in on the way. */
+  private handleDoubleTap = (x: number, y: number): void => {
+    if (!this.lastTapPoint) {
+      const point = this.intersectGlobe(x, y);
+      if (!point) return;
+      this.callbacks.onTapPoint(point.lat, point.lon);
+    }
+    this.rig.zoomBy(DOUBLE_TAP_ZOOM, performance.now());
   };
 
   private handleKeyDown = (event: KeyboardEvent): void => {
@@ -462,43 +553,6 @@ export class GlobeScene {
         return;
     }
     event.preventDefault();
-  };
-
-  private handlePointerDown = (event: PointerEvent): void => {
-    // A second finger is a pinch, and other mouse buttons aren't taps.
-    this.tapStart =
-      event.isPrimary && event.button === 0
-        ? {
-            x: event.clientX,
-            y: event.clientY,
-            time: performance.now(),
-            pointerId: event.pointerId,
-          }
-        : null;
-  };
-
-  private handlePointerCancel = (): void => {
-    this.tapStart = null;
-  };
-
-  private handlePointerUp = (event: PointerEvent): void => {
-    const start = this.tapStart;
-    this.tapStart = null;
-    if (start?.pointerId !== event.pointerId) return;
-    const travel = Math.hypot(event.clientX - start.x, event.clientY - start.y);
-    if (travel > TAP_MAX_TRAVEL_PX || performance.now() - start.time > TAP_MAX_MS) return;
-
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-
-    const city = this.markers.pick(x, y);
-    if (city) {
-      this.callbacks.onTapCity(city);
-      return;
-    }
-    const point = this.intersectGlobe(x, y);
-    if (point) this.callbacks.onTapPoint(point.lat, point.lon);
   };
 
   /** Analytic ray and unit sphere intersection. */

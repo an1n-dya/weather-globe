@@ -43,17 +43,21 @@ export function zoneFor(
   return nominalZone(lon);
 }
 
+const offsetFormats = new Map<string, Intl.DateTimeFormat>();
+
 /** Minutes ahead of UTC for an IANA zone at a moment, including DST. */
 export function zoneOffsetMinutes(zone: string, date: Date): number {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    timeZoneName: "longOffset",
-  }).formatToParts(date);
-  const name = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT";
-  const match = /GMT([+-])(\d{1,2})(?::(\d{2}))?/.exec(name);
+  let format = offsetFormats.get(zone);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" });
+    offsetFormats.set(zone, format);
+  }
+  const name = format.formatToParts(date).find((p) => p.type === "timeZoneName")?.value ?? "GMT";
+  // Some engines write a true minus sign (U+2212) rather than a hyphen.
+  const match = /GMT([+\-−])(\d{1,2})(?::(\d{2}))?/.exec(name);
   if (!match) return 0;
   const minutes = Number(match[2]) * 60 + Number(match[3] ?? 0);
-  return match[1] === "-" ? -minutes : minutes;
+  return match[1] === "+" ? minutes : -minutes;
 }
 
 export function formatOffset(minutes: number): string {
@@ -64,13 +68,48 @@ export function formatOffset(minutes: number): string {
   return `UTC${minutes > 0 ? "+" : "−"}${hours}${rest ? `:${String(rest).padStart(2, "0")}` : ""}`;
 }
 
+const FRACTIONS: Readonly<Record<number, string>> = { 15: "¼", 30: "½", 45: "¾" };
+
+/** "1 hour", "2 hours", "5½ hours", "45 minutes", "2 hours 20 minutes". */
+export function formatDuration(totalMinutes: number): string {
+  const abs = Math.abs(Math.round(totalMinutes));
+  const hours = Math.floor(abs / 60);
+  const minutes = abs % 60;
+  if (hours === 0) return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  if (minutes === 0) return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  const fraction = FRACTIONS[minutes];
+  if (fraction) return `${hours}${fraction} hours`;
+  return `${hours} ${hours === 1 ? "hour" : "hours"} ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
 /** Wording for how a place's clock compares with the viewer's. */
 export function formatDifference(placeMinutes: number, viewerMinutes: number): string {
   const diff = placeMinutes - viewerMinutes;
   if (diff === 0) return "Same time as you";
-  const abs = Math.abs(diff);
-  const hours = Math.floor(abs / 60);
-  const rest = abs % 60;
-  const amount = [hours ? `${hours}h` : "", rest ? `${rest}m` : ""].filter(Boolean).join(" ");
-  return `${amount} ${diff > 0 ? "ahead of" : "behind"} you`;
+  return `${formatDuration(diff)} ${diff > 0 ? "ahead of" : "behind"} you`;
+}
+
+/** The calendar date in a zone, as YYYY-MM-DD. */
+function dateKey(date: Date, zone?: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+/**
+ * Whether it's already tomorrow, or still yesterday, at the place compared with
+ * the viewer's own calendar. Across the date line this can differ by a day.
+ */
+export function relativeDay(
+  date: Date,
+  zone: string,
+  viewerZone?: string,
+): "today" | "tomorrow" | "yesterday" {
+  const there = dateKey(date, zone);
+  const here = dateKey(date, viewerZone);
+  if (there === here) return "today";
+  return there > here ? "tomorrow" : "yesterday";
 }

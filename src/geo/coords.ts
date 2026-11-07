@@ -34,6 +34,8 @@ export function vec3ToLatLon(x: number, y: number, z: number): { lat: number; lo
 
 /** Wraps a longitude into [-180, 180). */
 export function normalizeLon(lon: number): number {
+  // In range already: returned as is, since the arithmetic below adds float noise (88.36 → 88.36000000000001).
+  if (lon >= -180 && lon < 180) return lon === 0 ? 0 : lon;
   const wrapped = ((((lon + 180) % 360) + 360) % 360) - 180;
   return Object.is(wrapped, -0) ? 0 : wrapped;
 }

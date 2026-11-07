@@ -2,13 +2,14 @@ import { around, distance as kmBetween } from "geokdbush";
 import KDBush from "kdbush";
 import { dataUrl } from "../data";
 import { normalizeLon } from "./coords";
+import { inflate, Regions, SURFACE } from "./regions";
 
-type PlaceKind = "city" | "near" | "ocean" | "remote" | "unknown";
+type PlaceKind = "city" | "near" | "ocean" | "lake" | "remote" | "unknown";
 
 export interface Place {
   kind: PlaceKind;
   name: string;
-  /** Country name, when known. */
+  /** Country name, or for open water the nearest town, when known. */
   region: string;
 }
 
@@ -34,53 +35,92 @@ export class PlaceIndex {
 
   constructor(
     private readonly cities: ReadonlyArray<CityRow>,
-    private readonly landGrid: Uint8Array,
+    private readonly regions: Regions,
   ) {
-    this.index = new KDBush(cities.length);
+    this.index = new KDBush(Math.max(1, cities.length));
     for (const city of cities) this.index.add(city[3], city[2]);
     this.index.finish();
   }
 
   isLand(lat: number, lon: number): boolean {
-    const x = Math.min(719, Math.floor((normalizeLon(lon) + 180) * 2));
-    const y = Math.max(0, Math.min(359, Math.floor((90 - lat) * 2)));
-    const bit = y * 720 + x;
-    return ((this.landGrid[bit >> 3] ?? 0) & (1 << (bit & 7))) !== 0;
+    return this.regions.isLand(lat, lon);
+  }
+
+  /** The best-known town nearby, favoring larger places so a suburb does not beat its own city. */
+  private nearestTown(lat: number, lon: number): { row: CityRow; km: number } | null {
+    let best: { row: CityRow; km: number; score: number } | null = null;
+    for (const id of around(this.index, lon, lat, 12, SEARCH_RADIUS_KM)) {
+      const row = this.cities[id];
+      if (!row) continue;
+      const km = kmBetween(lon, lat, row[3], row[2]);
+      const score = km / (1 + 1.2 * Math.log10(Math.max(row[4], 15_000) / 15_000));
+      if (!best || score < best.score) best = { row, km, score };
+    }
+    return best;
   }
 
   placeAt(lat: number, lon: number): Place {
     const lng = normalizeLon(lon);
+    const surface = this.regions.surfaceAt(lat, lng);
+    const town = this.nearestTown(lat, lng);
 
-    // Favors larger places, so a suburb does not beat its own city.
-    let best: { row: CityRow; km: number; score: number } | null = null;
-    for (const id of around(this.index, lng, lat, 12, SEARCH_RADIUS_KM)) {
-      const row = this.cities[id];
-      if (!row) continue;
-      const km = kmBetween(lng, lat, row[3], row[2]);
-      const score = km / (1 + 1.2 * Math.log10(Math.max(row[4], 15_000) / 15_000));
-      if (!best || score < best.score) best = { row, km, score };
+    // A town's own waterfront still goes by the town's name.
+    if (town && town.km <= AT_CITY_KM) {
+      return { kind: "city", name: town.row[0], region: countryName(town.row[1]) };
     }
-
-    if (best) {
+    if (surface === SURFACE.ocean) {
       return {
-        kind: best.km <= AT_CITY_KM ? "city" : "near",
-        name: best.km <= AT_CITY_KM ? best.row[0] : `Near ${best.row[0]}`,
-        region: countryName(best.row[1]),
+        kind: "ocean",
+        name: this.regions.seaAt(lat, lng) || "Open ocean",
+        region: town ? `Near ${town.row[0]}, ${countryName(town.row[1])}` : "",
       };
     }
-    return this.isLand(lat, lng)
-      ? { kind: "remote", name: "Remote area", region: "" }
-      : { kind: "ocean", name: "Open ocean", region: "" };
+    if (surface === SURFACE.lake) {
+      return {
+        kind: "lake",
+        name: this.regions.lakeAt(lat, lng) || "Lake",
+        region: this.regions.countryAt(lat, lng),
+      };
+    }
+    if (town) {
+      return { kind: "near", name: `Near ${town.row[0]}`, region: countryName(town.row[1]) };
+    }
+    const fallback = surface === SURFACE.iceShelf ? "Ice shelf" : "Remote area";
+    return {
+      kind: "remote",
+      name: this.regions.regionAt(lat, lng) || fallback,
+      region: this.regions.countryAt(lat, lng),
+    };
   }
 }
 
+export async function loadRegions(): Promise<Regions> {
+  const response = await fetch(dataUrl("regions.bin"));
+  if (!response.ok) throw new Error(`Could not load region data: HTTP ${response.status}`);
+  return new Regions(await inflate(new Uint8Array(await response.arrayBuffer())));
+}
+
 export async function loadPlaceIndex(): Promise<{ index: PlaceIndex; cities: CityRow[] }> {
-  const [citiesResponse, gridResponse] = await Promise.all([
+  const [citiesResponse, regions] = await Promise.all([
     fetch(dataUrl("cities.json")),
-    fetch(dataUrl("land-grid.bin")),
+    loadRegions(),
   ]);
-  if (!citiesResponse.ok || !gridResponse.ok) throw new Error("Could not load place data");
-  const cities = (await citiesResponse.json()) as CityRow[];
-  const grid = new Uint8Array(await gridResponse.arrayBuffer());
-  return { index: new PlaceIndex(cities, grid), cities };
+  if (!citiesResponse.ok)
+    throw new Error(`Could not load place data: HTTP ${citiesResponse.status}`);
+  const cities = parseCityRows(await citiesResponse.json());
+  return { index: new PlaceIndex(cities, regions), cities };
+}
+
+/** Keeps only well-formed rows, so a damaged file can't put NaN on screen. */
+export function parseCityRows(raw: unknown): CityRow[] {
+  if (!Array.isArray(raw)) throw new Error("Place data is not a list");
+  return raw.filter(
+    (row): row is CityRow =>
+      Array.isArray(row) &&
+      typeof row[0] === "string" &&
+      typeof row[1] === "string" &&
+      Number.isFinite(row[2]) &&
+      Number.isFinite(row[3]) &&
+      Number.isFinite(row[4]),
+  );
 }

@@ -557,26 +557,82 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.stats > .stats-wide {
+  grid-column: 1 / -1;
+}
+
+.hourly-wrap {
+  position: relative;
+}
+
+/* Exactly six whole hours fit, and scrolling snaps to an hour, so none is ever cut in half. */
 .hourly {
-  display: flex;
-  gap: 4px;
+  --hours-shown: 6;
+  --hour-gap: 6px;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: calc((100% - (var(--hours-shown) - 1) * var(--hour-gap)) / var(--hours-shown));
+  gap: var(--hour-gap);
   margin: 0;
-  padding: 0 0 6px;
+  padding: 0;
   list-style: none;
   overflow-x: auto;
-  scrollbar-width: thin;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  border-radius: 12px;
+}
+.hourly::-webkit-scrollbar {
+  display: none;
 }
 
 .hourly li {
-  flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  width: 54px;
-  padding: 8px 2px;
+  min-width: 0;
+  padding: 8px 0;
   border-radius: 12px;
   background: var(--surface-raised);
+  scroll-snap-align: start;
+}
+
+.hourly-page {
+  position: absolute;
+  top: 50%;
+  display: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: rgba(20, 32, 64, 0.96);
+  transform: translateY(-50%);
+}
+.hourly-page.is-prev {
+  left: -10px;
+}
+.hourly-page.is-next {
+  right: -10px;
+}
+.hourly-page svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.hourly-page:disabled {
+  visibility: hidden;
+}
+@media (hover: hover) {
+  .hourly-wrap:hover .hourly-page {
+    display: grid;
+  }
 }
 
 .hourly-time {
