@@ -1224,12 +1224,15 @@ button:disabled {
   pointer-events: none;
   user-select: none;
 }
+/* Each section pulses as a whole: a handful of animated layers rather than one per value. */
+.weather-skeleton > * {
+  animation: pulse 1.3s ease-in-out infinite;
+}
 .weather-skeleton
   :is(.status-line span, .hourly li > span, .daily-list li > span, .detail dd > span) {
   border-radius: var(--radius-s);
   background: var(--surface-raised);
   color: transparent;
-  animation: pulse 1.3s ease-in-out infinite;
 }
 .weather-skeleton :is(.hourly li > span, .daily-list li > span):empty {
   background: none;
@@ -1239,12 +1242,11 @@ button:disabled {
   object-position: 0 200px;
   border-radius: 50%;
   background: var(--surface-raised);
-  animation: pulse 1.3s ease-in-out infinite;
 }
 .weather-skeleton :is(.section-title, .detail dt) {
   opacity: 0.55;
 }
-.weather-skeleton[data-still] :is(span, img) {
+.weather-skeleton[data-still] > * {
   animation: none;
   opacity: 0.6;
 }
