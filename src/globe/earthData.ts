@@ -3,7 +3,7 @@
  * writes it, and the globe, which reads it. The file is one DEFLATE stream;
  * inflated, it holds:
  *
- *   "WGE2", header length (u32 LE), header JSON padded to 4 bytes, then one
+ *   "WGE3", header length (u32 LE), header JSON padded to 4 bytes, then one
  *   block per sampling level, coarse to fine. A block of n points holds
  *   u, low bytes    n x u8 \
  *   u, high bytes   n x u8  |  octahedral unit vectors, each stored as the
@@ -11,6 +11,8 @@
  *   v, high bytes   n x u8 /   block, modulo 65,536
  *   values          n x u8   height (land, lakes) or depth (ocean), square-root coded
  *   infos           n x u8   surface kind in bits 0-1, biome in bits 2-5
+ *   seasons, low    n x u8 \  one bit per month, January in bit 0: snow on land,
+ *   seasons, high   n x u8 /   ice on lakes and seas
  *
  * Points within a level follow a space-filling curve, so neighbors are close
  * and the differences small. Because levels come in order, a prefix of the
@@ -18,7 +20,7 @@
  * arrive in the first fifth of the download, make the light globe.
  */
 
-export const EARTH_MAGIC = "WGE2";
+export const EARTH_MAGIC = "WGE3";
 
 export type DetailTier = "low" | "medium" | "high";
 
@@ -114,6 +116,8 @@ export interface EarthPoints {
   values: Uint8Array;
   kinds: Uint8Array;
   biomes: Uint8Array;
+  /** The months with snow or ice, one bit each, January in bit 0. */
+  seasons: Uint16Array;
 }
 
 /** What the build writes for each point, in file order. */
@@ -122,14 +126,18 @@ export interface EncodedPoints {
   octahedral: Uint16Array;
   values: Uint8Array;
   infos: Uint8Array;
+  seasons: Uint16Array;
 }
+
+/** Bytes per point in the file. */
+const POINT_BYTES = 8;
 
 /** Lays out an earth file, before compression. */
 export function encodeEarth(header: EarthHeader, points: EncodedPoints): Uint8Array<ArrayBuffer> {
   const headerBytes = new TextEncoder().encode(JSON.stringify(header));
   const headerLength = Math.ceil(headerBytes.length / 4) * 4;
   const body = 8 + headerLength;
-  const file = new Uint8Array(body + header.count * 6);
+  const file = new Uint8Array(body + header.count * POINT_BYTES);
   file.set(new TextEncoder().encode(EARTH_MAGIC), 0);
   new DataView(file.buffer).setUint32(4, headerLength, true);
   file.set(headerBytes, 8);
@@ -154,7 +162,12 @@ export function encodeEarth(header: EarthHeader, points: EncodedPoints): Uint8Ar
     }
     file.set(points.values.subarray(start, end), offset + 4 * n);
     file.set(points.infos.subarray(start, end), offset + 5 * n);
-    offset += 6 * n;
+    for (let k = 0; k < n; k++) {
+      const season = points.seasons[start + k]!;
+      file[offset + 6 * n + k] = season & 0xff;
+      file[offset + 7 * n + k] = season >> 8;
+    }
+    offset += POINT_BYTES * n;
     start = end;
   }
   return file;
@@ -218,7 +231,7 @@ export class EarthDecoder {
     checkHeader(header);
     const { count } = header;
     // The whole file's size is known now, so the buffer grows only once more.
-    const total = 8 + headerLength + count * 6;
+    const total = 8 + headerLength + count * POINT_BYTES;
     if (this.buffer.length < total) {
       const sized = new Uint8Array(total);
       sized.set(this.buffer.subarray(0, this.length));
@@ -231,6 +244,7 @@ export class EarthDecoder {
       values: new Uint8Array(count),
       kinds: new Uint8Array(count),
       biomes: new Uint8Array(count),
+      seasons: new Uint16Array(count),
     };
   }
 
@@ -241,7 +255,7 @@ export class EarthDecoder {
       const start = this.decoded;
       const n = levels[this.level]! - start;
       const base = this.offset;
-      if (this.length < base + 6 * n) return;
+      if (this.length < base + POINT_BYTES * n) return;
       let u = 0;
       let v = 0;
       for (let k = 0; k < n; k++) {
@@ -256,8 +270,9 @@ export class EarthDecoder {
         const info = bytes[base + 5 * n + k]!;
         points.kinds[i] = info & 3;
         points.biomes[i] = info >> 2;
+        points.seasons[i] = bytes[base + 6 * n + k]! | (bytes[base + 7 * n + k]! << 8);
       }
-      this.offset = base + 6 * n;
+      this.offset = base + POINT_BYTES * n;
       this.decoded = start + n;
       this.level++;
     }

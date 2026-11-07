@@ -4,10 +4,12 @@ import { type DetailTier, EarthDecoder } from "./earthData";
 import { buildEarthArrays, type EarthArrays } from "./earthMesh";
 
 /**
- * Messages to the worker: the compressed file in pieces as it downloads, its
- * end, and which tier to finish with once the scene knows.
+ * Messages to the worker: the page's time (for the season's snow and ice), the
+ * compressed file in pieces as it downloads, its end, and which tier to finish
+ * with once the scene knows.
  */
 export type EarthCommand =
+  | { now: number }
   | { chunk: Uint8Array<ArrayBuffer> }
   | { end: true }
   | { final: DetailTier };
@@ -19,6 +21,7 @@ export type EarthReply =
 
 const decoder = new EarthDecoder();
 let final: DetailTier | null = null;
+let now = Date.now();
 let sentLow = false;
 let finished = false;
 let failed = false;
@@ -38,7 +41,7 @@ function fail(error: unknown): void {
 function send(tier: DetailTier): void {
   const points = decoder.points;
   if (!points) return;
-  const arrays = buildEarthArrays(points, points.header.tiers[tier]);
+  const arrays = buildEarthArrays(points, points.header.tiers[tier], new Date(now));
   reply({ tier, arrays, faces: arrays.positions.length / 9 }, arrays);
 }
 
@@ -72,7 +75,9 @@ const inflater = createInflater((chunk) => {
 /** Decoding and triangulating take a while on a phone, so they happen here, as the file arrives. */
 self.onmessage = async ({ data }: MessageEvent<EarthCommand>) => {
   try {
-    if ("chunk" in data) {
+    if ("now" in data) {
+      now = data.now;
+    } else if ("chunk" in data) {
       (await inflater).push(data.chunk);
     } else if ("end" in data) {
       await (await inflater).end();

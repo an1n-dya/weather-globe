@@ -779,6 +779,33 @@ test("the globe loads a light version first, then the full one", async ({ page, 
   else expect(faces).toBeGreaterThan(isMobile ? 25_000 : 150_000);
 });
 
+test("the data credits stay in the panel", async ({ page, isMobile }) => {
+  await mockApi(page);
+  await page.goto("/#20.00,0.00");
+  await globeReady(page);
+  if (isMobile) {
+    // At the foot of the sheet, once it's pulled up.
+    await page.getByRole("button", { name: "Show more" }).click();
+    await page.getByRole("button", { name: "Show more" }).click();
+  }
+  const credits = page.locator(".credits");
+  await credits.scrollIntoViewIfNeeded();
+  await expect(credits).toBeVisible();
+  for (const [name, host] of [
+    ["Open-Meteo", "open-meteo.com"],
+    ["GeoNames", "geonames.org"],
+    ["Natural Earth", "naturalearthdata.com"],
+    ["NOAA ETOPO", "noaa.gov"],
+    ["NASA Blue Marble", "nasa.gov"],
+    ["NSIDC Sea Ice Index", "nsidc.org"],
+  ] as const) {
+    await expect(credits.getByRole("link", { name: new RegExp(name) })).toHaveAttribute(
+      "href",
+      new RegExp(host.replace(".", "\\.")),
+    );
+  }
+});
+
 test("starts without console errors or warnings", async ({ page }) => {
   const messages: string[] = [];
   page.on("console", (message) => {

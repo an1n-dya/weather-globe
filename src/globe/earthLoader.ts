@@ -37,6 +37,8 @@ class EarthLoader {
         event.preventDefault();
         this.handleWorkerFailure(new Error(event.message || "The globe worker failed"));
       };
+      // The season's snow and ice follow the page's clock.
+      this.send({ now: Date.now() });
     } catch (error) {
       this.handleWorkerFailure(error);
     }

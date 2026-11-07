@@ -34,6 +34,7 @@ const PALETTE: Readonly<Record<number, Rgb>> = {
 };
 
 const SEA_ICE: Rgb = [0.76, 0.86, 0.93];
+const LAKE_ICE: Rgb = [0.8, 0.88, 0.94];
 const LAKE: Rgb = [0.2, 0.62, 0.82];
 const COAST_WATER: Rgb = [0.27, 0.76, 0.85];
 /** Depth in meters, and the sea's color there. */
@@ -66,6 +67,33 @@ function depthColor(depth: number): Rgb {
 function snowline(lat: number): number {
   return 4300 - Math.max(0, Math.abs(lat) - 20) * 70;
 }
+
+/**
+ * Where a date falls in the year, in months from mid-January: each month's
+ * snow and ice describe its middle, and dates in between blend the two.
+ */
+export function seasonPosition(date: Date): number {
+  const year = date.getUTCFullYear();
+  const start = Date.UTC(year, 0, 1);
+  const fraction = (date.getTime() - start) / (Date.UTC(year + 1, 0, 1) - start);
+  return (fraction * 12 - 0.5 + 12) % 12;
+}
+
+/** How much a point's snow or ice is in at a season position, from 0 to 1. */
+function seasonal(mask: number, position: number): number {
+  const month = Math.floor(position);
+  const weight = position - month;
+  const now = (mask >> month) & 1;
+  const next = (mask >> ((month + 1) % 12)) & 1;
+  return now * (1 - weight) + next * weight;
+}
+
+/** Snow mostly hides open ground; under trees the canopy still shows through. */
+const SNOW_COVER: Readonly<Record<number, number>> = {
+  [BIOME.borealForest]: 0.62,
+  [BIOME.temperateForest]: 0.7,
+  [BIOME.tropicalForest]: 0.7,
+};
 
 /** Faces wider than this (in radians, about 130 km) are open water, not a sunlit shallow. */
 const SHALLOW_MAX_EDGE = 0.02;
@@ -179,10 +207,15 @@ function shortestLandEdge(points: Float64Array, corner: number[], water: number)
   return a === undefined || b === undefined ? 0 : edgeBetween(points, a, b);
 }
 
-/** Builds the globe from the first `count` points. */
-export function buildEarthArrays(data: EarthPoints, count: number): EarthArrays {
+/** Builds the globe from the first `count` points, with the snow and ice of `date`'s season. */
+export function buildEarthArrays(
+  data: EarthPoints,
+  count: number,
+  date: Date = new Date(),
+): EarthArrays {
   const n = Math.min(count, data.header.count);
-  const { positions: points, values, kinds, biomes } = data;
+  const { positions: points, values, kinds, biomes, seasons } = data;
+  const season = seasonPosition(date);
   const faces = triangulateSphere(points, n);
   const faceTotal = faces.length / 3;
 
@@ -205,6 +238,9 @@ export function buildEarthArrays(data: EarthPoints, count: number): EarthArrays 
     let heightMax = 0;
     let heightMin = Number.POSITIVE_INFINITY;
     let depthSum = 0;
+    let snowSum = 0;
+    let lakeIceSum = 0;
+    let seaIceSum = 0;
     let waterCorner = -1;
     let cx = 0;
     let cy = 0;
@@ -212,17 +248,21 @@ export function buildEarthArrays(data: EarthPoints, count: number): EarthArrays 
     for (let c = 0; c < 3; c++) {
       const v = corner[c]!;
       const kind = kinds[v]!;
+      const cover = seasonal(seasons[v]!, season);
       if (kind === KIND.land || kind === KIND.iceShelf) {
         solid++;
+        snowSum += cover;
         const height = decodeHeight(values[v]!);
         heightSum += height;
         heightMax = Math.max(heightMax, height);
         heightMin = Math.min(heightMin, height);
       } else if (kind === KIND.lake) {
         lakes++;
+        lakeIceSum += cover;
         waterCorner = v;
       } else {
         oceans++;
+        seaIceSum += cover;
         depthSum += decodeDepth(values[v]!);
         waterCorner = v;
       }
@@ -287,17 +327,35 @@ export function buildEarthArrays(data: EarthPoints, count: number): EarthArrays 
         biome === BIOME.steppe;
       const line = snowline(Math.asin(cy / length) * (180 / Math.PI)) + (dry ? 2000 : 0);
       const steep = heightMax - heightMin > 500 || heightMax > line + 1400;
-      if (biome === BIOME.snow || (steep && heightMax > line)) rgb = PALETTE[BIOME.snow]!;
-      if (rgb === PALETTE[BIOME.snow] || biome === BIOME.ice) gloss = 70;
+      // Below the highest peaks, the caps come and go with the season's snow.
+      const capped =
+        steep && heightMax > line && (heightMax > line + 1500 || snowSum / solid > 0.25);
+      if (biome === BIOME.snow || capped) rgb = PALETTE[BIOME.snow]!;
+      if (rgb === PALETTE[BIOME.snow] || biome === BIOME.ice) {
+        gloss = 70;
+      } else if (snowSum / solid > 0.3 + 0.4 * shade) {
+        // The season's snow comes and goes a few faces at a time, not along a hard line.
+        const cover = SNOW_COVER[biome] ?? 0.9;
+        const snow = PALETTE[BIOME.snow]!;
+        rgb = [
+          rgb[0] + (snow[0] - rgb[0]) * cover,
+          rgb[1] + (snow[1] - rgb[1]) * cover,
+          rgb[2] + (snow[2] - rgb[2]) * cover,
+        ];
+        gloss = 60;
+      }
       jitter = 0.9 + shade * 0.17;
     } else if (lakes > oceans) {
-      rgb = solid > 0 && longest < SHALLOW_MAX_EDGE ? COAST_WATER : LAKE;
-      gloss = 220;
+      if (lakeIceSum / lakes > 0.3 + 0.4 * shade) {
+        rgb = LAKE_ICE;
+        gloss = 90;
+      } else {
+        rgb = solid > 0 && longest < SHALLOW_MAX_EDGE ? COAST_WATER : LAKE;
+        gloss = 220;
+      }
       jitter = 0.95 + shade * 0.08;
     } else {
-      const length = Math.hypot(cx, cy, cz) || 1;
-      const lat = Math.asin(cy / length) * (180 / Math.PI);
-      if (lat + (shade - 0.5) * 3 > 79.5) {
+      if (oceans > 0 && seaIceSum / oceans > 0.3 + 0.4 * shade) {
         rgb = SEA_ICE;
         gloss = 90;
       } else {

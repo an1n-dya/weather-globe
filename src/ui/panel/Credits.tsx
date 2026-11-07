@@ -7,6 +7,7 @@ const SOURCES = [
     "https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/",
     "NASA Blue Marble",
   ],
+  ["https://nsidc.org/data/g02135/versions/4", "NSIDC Sea Ice Index"],
 ] as const;
 
 export function Credits() {

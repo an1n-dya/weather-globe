@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { deflateSync, inflateSync } from "fflate";
 import { PerspectiveCamera } from "three";
 import { describe, expect, it, vi } from "vitest";
-import { latLonToVec3 } from "../src/geo/coords";
+import { latLonToVec3, vec3ToLatLon } from "../src/geo/coords";
 import {
   decay,
   degreesPerPixel,
@@ -21,7 +21,12 @@ import {
   encodeEarth,
   encodeOctahedral,
 } from "../src/globe/earthData";
-import { buildEarthArrays, triangulateSphere } from "../src/globe/earthMesh";
+import {
+  buildEarthArrays,
+  type EarthArrays,
+  seasonPosition,
+  triangulateSphere,
+} from "../src/globe/earthMesh";
 import { createInflater } from "../src/inflate";
 import { realRegions } from "./helpers/regions";
 
@@ -65,7 +70,8 @@ describe("earth file", () => {
   const octahedral = new Uint16Array(24).map((_, i) => (i * 40_503 + 11) % 65_536);
   const values = new Uint8Array(12).map((_, i) => i * 20);
   const infos = new Uint8Array(12).map((_, i) => (i % 4) | ((i % 13) << 2));
-  const file = encodeEarth(header, { octahedral, values, infos });
+  const seasons = new Uint16Array(12).map((_, i) => (i * 1_237) & 0xfff);
+  const file = encodeEarth(header, { octahedral, values, infos, seasons });
 
   it("reads back what was written", () => {
     const points = decodeEarth(file);
@@ -76,6 +82,7 @@ describe("earth file", () => {
       expect(points.values[i]).toBe(values[i]);
       expect(points.kinds[i]).toBe(infos[i]! & 3);
       expect(points.biomes[i]).toBe(infos[i]! >> 2);
+      expect(points.seasons[i]).toBe(seasons[i]);
     }
   });
 
@@ -98,7 +105,10 @@ describe("earth file", () => {
     expect(() => decodeEarth(new TextEncoder().encode("WGE1 an older file"))).toThrow(
       /Not an earth file/,
     );
-    const damaged = encodeEarth({ ...header, levels: [4, 12, 7] }, { octahedral, values, infos });
+    const damaged = encodeEarth(
+      { ...header, levels: [4, 12, 7] },
+      { octahedral, values, infos, seasons },
+    );
     expect(() => decodeEarth(damaged)).toThrow(/damaged header/);
   });
 
@@ -199,7 +209,12 @@ describe("globe mesh", () => {
   );
 
   describe("at full detail", () => {
-    const { positions, colors } = buildEarthArrays(points, tiers.high);
+    // Midsummer in the north, when the lakes are open.
+    const { positions, colors } = buildEarthArrays(
+      points,
+      tiers.high,
+      new Date("2026-07-15T12:00:00Z"),
+    );
     const faceTotal = positions.length / 9;
 
     /** The gloss of the face the point falls in: 0 is land, 255 the sea. */
@@ -274,6 +289,87 @@ describe("globe mesh", () => {
     ])("%s is water", (_name, lat, lon) => {
       expect(glossAt(lat, lon)).toBeGreaterThan(150);
     });
+  });
+});
+
+describe("seasons", () => {
+  const points = decodeEarth(inflateSync(new Uint8Array(readFileSync("public/data/earth.bin"))));
+  const at = (date: string) => buildEarthArrays(points, points.header.tiers.medium, new Date(date));
+  const january = at("2026-01-15T12:00:00Z");
+  const february = at("2026-02-15T12:00:00Z");
+  const july = at("2026-07-15T12:00:00Z");
+  const august = at("2026-08-15T12:00:00Z");
+  const september = at("2026-09-15T12:00:00Z");
+  /**
+   * Gloss marks what a face is: 90 for ice on lakes and seas, 220 and 255 for
+   * open water, 60 for the season's snow, 70 for lasting snow, 0 for bare land.
+   */
+  const ICE = 90;
+  const SNOW = 60;
+  const WATER = [ICE, 220, 255];
+  const LAND = [SNOW, 70, 0];
+
+  /** Among the faces of one kind centered in a box of latitude and longitude, the share with a gloss. */
+  const share = (
+    { positions, colors }: EarthArrays,
+    box: number[],
+    gloss: number,
+    among: number[],
+  ): number => {
+    const [south = 0, north = 0, west = 0, east = 0] = box;
+    let inBox = 0;
+    let matching = 0;
+    for (let f = 0; f < positions.length / 9; f++) {
+      const o = f * 9;
+      const x = positions[o]! + positions[o + 3]! + positions[o + 6]!;
+      const y = positions[o + 1]! + positions[o + 4]! + positions[o + 7]!;
+      const z = positions[o + 2]! + positions[o + 5]! + positions[o + 8]!;
+      const { lat, lon } = vec3ToLatLon(x, y, z);
+      const faceGloss = colors[f * 12 + 3]!;
+      if (lat < south || lat > north || lon < west || lon > east) continue;
+      if (!among.includes(faceGloss)) continue;
+      inBox++;
+      if (faceGloss === gloss) matching++;
+    }
+    expect(inBox).toBeGreaterThan(20);
+    return matching / inBox;
+  };
+
+  it("freezes Hudson Bay in winter and opens it in summer", () => {
+    const bay = [56, 63, -93, -79];
+    expect(share(february, bay, ICE, WATER)).toBeGreaterThan(0.9);
+    expect(share(august, bay, ICE, WATER)).toBeLessThan(0.05);
+  });
+
+  it("rings Antarctica with sea ice in September, not in February", () => {
+    // In the recent low years the ice reached past 60° south mostly in the Weddell and Indian sectors.
+    const ring = [-66, -60, -180, 180];
+    expect(share(september, ring, ICE, WATER)).toBeGreaterThan(0.55);
+    expect(share(february, ring, ICE, WATER)).toBeLessThan(0.15);
+  });
+
+  it("keeps the middle of the Arctic Ocean frozen, even at the end of summer", () => {
+    expect(share(september, [82, 90, -180, 180], ICE, WATER)).toBeGreaterThan(0.9);
+  });
+
+  it("covers Siberia with snow in January, and not in July", () => {
+    const siberia = [55, 65, 60, 120];
+    expect(share(january, siberia, SNOW, LAND)).toBeGreaterThan(0.7);
+    expect(share(july, siberia, SNOW, LAND)).toBeLessThan(0.02);
+  });
+
+  it("keeps the Sahara free of snow all year", () => {
+    const sahara = [18, 28, -5, 25];
+    expect(share(january, sahara, SNOW, LAND)).toBe(0);
+    expect(share(july, sahara, SNOW, LAND)).toBe(0);
+  });
+
+  it("measures the season from the middle of each month", () => {
+    // Mid-January is all January; mid-July all July; the turn of a month halfway between.
+    expect(seasonPosition(new Date("2026-01-16T12:00:00Z")) % 12).toBeLessThan(0.05);
+    expect(seasonPosition(new Date("2026-07-16T12:00:00Z"))).toBeCloseTo(6, 1);
+    expect(seasonPosition(new Date("2026-07-01T00:00:00Z"))).toBeCloseTo(5.46, 1);
+    expect(seasonPosition(new Date("2026-12-31T23:59:59Z"))).toBeCloseTo(11.5, 1);
   });
 });
 

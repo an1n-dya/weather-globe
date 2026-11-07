@@ -43,6 +43,7 @@ import {
 } from "../src/globe/earthData";
 import { cachedDownload, cachedJson, naturalEarth, root } from "./lib/download";
 import { rasterize, rewind } from "./lib/raster";
+import { loadSeaIce } from "./lib/seaIce";
 
 const EARTH_RADIUS_KM = 6371;
 
@@ -359,6 +360,33 @@ interface LandLook {
   glaciated: boolean;
 }
 
+const MONTH_NAMES = [
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+];
+const ALL_MONTHS = 0xfff;
+
+/**
+ * Snow in a month's Blue Marble color: bright, nearly gray, and at least as blue
+ * as it is red. That takes in snow under the taiga, which is only middling gray,
+ * and leaves out pale deserts, salt flats and summer tundra, which lean yellow.
+ */
+function isSnowy([r, g, b]: Vec3): boolean {
+  const brightness = (r + g + b) / 3;
+  const saturation = (Math.max(r, g, b) - Math.min(r, g, b)) / (Math.max(r, g, b) + 0.001);
+  return brightness >= 0.36 && saturation < 0.2 && b - r >= -0.02;
+}
+
 function classify(lat: number, height: number, look: LandLook): Biome {
   const [r, g, b] = look.color;
   const brightness = (r + g + b) / 3;
@@ -537,8 +565,8 @@ async function main() {
       return Math.max(COAST_SPACING_KM, flat * (1 - 0.55 * r));
     }
     if (kind === SURFACE.lake) return Math.min(60, COAST_SPACING_KM + 0.4 * dCoast);
-    // Finer in the Arctic, so the edge of the sea ice isn't a few huge facets.
-    const cap = lat > 70 ? 260 : 560;
+    // Finer toward the poles, so the edge of the sea ice isn't a few huge facets.
+    const cap = Math.abs(lat) > 52 ? 260 : 560;
     return Math.min(cap, COAST_SPACING_KM * 1.15 + 0.5 * dCoast);
   };
 
@@ -757,6 +785,108 @@ async function main() {
   biomes.set(smoothed);
   log("measured heights and biomes");
 
+  // The seasons, one bit per month: snow on land from Blue Marble, ice on the
+  // sea from NSIDC, and ice on lakes from the snow around them.
+  const seasons = new Uint16Array(count);
+  const latLonOf = (i: number) =>
+    vec3ToLatLon(coords[i * 3]!, coords[i * 3 + 1]!, coords[i * 3 + 2]!);
+  const footprintOf = (i: number, radiusKm: number) =>
+    footprint([coords[i * 3]!, coords[i * 3 + 1]!, coords[i * 3 + 2]!], radiusKm).map((q) =>
+      vec3ToLatLon(...q),
+    );
+  const spacingOf = (i: number) => {
+    const { lat, lon } = latLonOf(i);
+    return spacingAt(lat, lon, kinds[i]!, distanceToCoast(lat, lon));
+  };
+
+  // Snow: the land around each point, month by month. Ice and lasting snow need no season.
+  const seasonal = landIds.filter((i) => biomes[i] !== BIOME.ice && biomes[i] !== BIOME.snow);
+  const landSamples = seasonal.map((i) => {
+    const samples = footprintOf(i, Math.min(60, spacingOf(i) * 0.5)).filter((g) =>
+      isSolid(surfaceAt(g.lat, g.lon)),
+    );
+    return samples.length ? samples : [latLonOf(i)];
+  });
+  for (let month = 0; month < 12; month++) {
+    const name = MONTH_NAMES[month]!;
+    const number = String(month + 1).padStart(2, "0");
+    const image = jpeg.decode(
+      await cachedDownload(
+        `${bmng}/${name}/world.2004${number}.3x5400x2700.jpg`,
+        `bmng-${number}.jpg`,
+      ),
+      { useTArray: true, maxMemoryUsageInMB: 1024 },
+    );
+    seasonal.forEach((id, j) => {
+      const samples = landSamples[j]!;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (const sample of samples) {
+        const c = colorAt(image, sample.lat, sample.lon);
+        r += c[0];
+        g += c[1];
+        b += c[2];
+      }
+      if (isSnowy([r / samples.length, g / samples.length, b / samples.length])) {
+        seasons[id]! |= 1 << month;
+      }
+    });
+  }
+  // Pale ground that never changes, such as a salt flat, isn't snow.
+  for (const id of seasonal) {
+    if (seasons[id] === ALL_MONTHS && Math.abs(latLonOf(id).lat) < 55) seasons[id] = 0;
+  }
+  log("measured the snow of each month");
+
+  // Lakes freeze a month after the land around them is under snow, and thaw a month after it melts.
+  for (let i = 0; i < count; i++) {
+    if (kinds[i] !== SURFACE.lake) continue;
+    const { lat, lon } = latLonOf(i);
+    const near = around(landIndex, lon, lat, 24, 150).map((k) => landIds[k]!);
+    if (!near.length) continue;
+    let snowAround = 0;
+    for (let month = 0; month < 12; month++) {
+      const snowy = near.filter((id) => (seasons[id]! >> month) & 1).length;
+      if (snowy * 2 > near.length) snowAround |= 1 << month;
+    }
+    const was = (month: number, back: number) => (snowAround >> ((month - back + 12) % 12)) & 1;
+    for (let month = 0; month < 12; month++) {
+      if ((was(month, 0) && was(month, 1)) || (was(month, 1) && was(month, 2))) {
+        seasons[i]! |= 1 << month;
+      }
+    }
+  }
+
+  // Sea ice: most of the sea around a point frozen. Points by the shore look a little further out.
+  const seaIce = await loadSeaIce();
+  for (let i = 0; i < count; i++) {
+    if (kinds[i] !== SURFACE.ocean) continue;
+    const near = Math.min(60, spacingOf(i) * 0.5);
+    for (const radius of [near, 50, 100]) {
+      const samples = footprintOf(i, radius);
+      let mask = 0;
+      let measured = false;
+      for (let month = 0; month < 12; month++) {
+        let frozen = 0;
+        let sea = 0;
+        for (const { lat, lon } of samples) {
+          const ice = seaIce.frozen(lat, lon, month);
+          if (ice === null) continue;
+          sea++;
+          if (ice) frozen++;
+        }
+        if (sea) measured = true;
+        if (sea && frozen * 2 >= sea) mask |= 1 << month;
+      }
+      if (measured) {
+        seasons[i] = mask;
+        break;
+      }
+    }
+  }
+  log("measured lake and sea ice");
+
   // Order: by level, then along a space-filling curve within each, which compresses well.
   const octa = new Uint16Array(count * 2);
   for (let i = 0; i < count; i++) {
@@ -779,7 +909,9 @@ async function main() {
   const positions = new Uint16Array(count * 2);
   const values = new Uint8Array(count);
   const infos = new Uint8Array(count);
+  const seasonsInOrder = new Uint16Array(count);
   order.forEach((source, i) => {
+    seasonsInOrder[i] = seasons[source]!;
     positions[i * 2] = octa[source * 2]!;
     positions[i * 2 + 1] = octa[source * 2 + 1]!;
     const kind = kinds[source]!;
@@ -793,7 +925,12 @@ async function main() {
     levels: levelEnds,
     tiers: { low: levelEnds[1]!, medium: levelEnds[3]!, high: levelEnds[4]! },
   };
-  const file = encodeEarth(header, { octahedral: positions, values, infos });
+  const file = encodeEarth(header, {
+    octahedral: positions,
+    values,
+    infos,
+    seasons: seasonsInOrder,
+  });
   const packed = deflateSync(file, { level: 9 });
   writeFileSync(join(root, "public", "data", "earth.bin"), packed);
 
