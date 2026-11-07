@@ -267,7 +267,9 @@ export function InfoPanel({ layout, sheet, onSheet, heights }: Props) {
             <Details data={data} />
           </>
         ) : (
-          loading && <WeatherSkeleton />
+          // Kept while there's nothing to show, so the panel never changes shape; it only
+          // pulses while the weather is actually on its way.
+          <WeatherSkeleton still={!loading} />
         )}
         <SunArc sun={sun} minutes={minutes} />
         <SettingsSection />

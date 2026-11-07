@@ -1,5 +1,12 @@
 import Delaunator from "delaunator";
-import { BIOME, decodeDepth, decodeHeight, type EarthPoints, KIND } from "./earthData";
+import {
+  BIOME,
+  decodeDepth,
+  decodeHeight,
+  decodeWideDepth,
+  type EarthPoints,
+  KIND,
+} from "./earthData";
 
 export interface EarthArrays {
   /** Flat-shaded, non-indexed triangles: three corners per face. */
@@ -97,6 +104,14 @@ const SNOW_COVER: Readonly<Record<number, number>> = {
 
 /** Faces wider than this (in radians, about 130 km) are open water, not a sunlit shallow. */
 const SHALLOW_MAX_EDGE = 0.02;
+/**
+ * From about 75 km across to about 220 km, a sea face's color moves from its
+ * corners' own depths to the depth of the sea around them: a corner by the
+ * shore tells only of the shallows beside it, which a big face would smear far
+ * out to sea.
+ */
+const WIDE_FROM = 0.012;
+const WIDE_BY = 0.035;
 
 /** A stable pseudo-random number in [0, 1) for a point, so each face keeps its own shade. */
 function hash3(x: number, y: number, z: number): number {
@@ -214,7 +229,7 @@ export function buildEarthArrays(
   date: Date = new Date(),
 ): EarthArrays {
   const n = Math.min(count, data.header.count);
-  const { positions: points, values, kinds, biomes, seasons } = data;
+  const { positions: points, values, kinds, biomes, seasons, wideDepths } = data;
   const season = seasonPosition(date);
   const faces = triangulateSphere(points, n);
   const faceTotal = faces.length / 3;
@@ -238,6 +253,7 @@ export function buildEarthArrays(
     let heightMax = 0;
     let heightMin = Number.POSITIVE_INFINITY;
     let depthSum = 0;
+    let wideSum = 0;
     let snowSum = 0;
     let lakeIceSum = 0;
     let seaIceSum = 0;
@@ -264,6 +280,9 @@ export function buildEarthArrays(
         oceans++;
         seaIceSum += cover;
         depthSum += decodeDepth(values[v]!);
+        // Zero means the point's own depth stands for the wider sea too.
+        const wide = wideDepths[v]!;
+        wideSum += wide ? decodeWideDepth(wide) : decodeDepth(values[v]!);
         waterCorner = v;
       }
       const r = radii[v]!;
@@ -360,10 +379,13 @@ export function buildEarthArrays(
         gloss = 90;
       } else {
         // Small faces touching the shore are shallow and bright; the rest follows the depth.
+        const near = oceans ? depthSum / oceans : 0;
+        const wide = oceans ? wideSum / oceans : 0;
+        const reach = Math.min(1, Math.max(0, (longest - WIDE_FROM) / (WIDE_BY - WIDE_FROM)));
         rgb =
           solid > 0 && longest < SHALLOW_MAX_EDGE
             ? COAST_WATER
-            : depthColor(oceans ? depthSum / oceans : 0);
+            : depthColor(near + (wide - near) * reach);
         gloss = 255;
       }
       jitter = 0.94 + shade * 0.1;

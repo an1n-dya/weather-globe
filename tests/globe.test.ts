@@ -71,7 +71,8 @@ describe("earth file", () => {
   const values = new Uint8Array(12).map((_, i) => i * 20);
   const infos = new Uint8Array(12).map((_, i) => (i % 4) | ((i % 13) << 2));
   const seasons = new Uint16Array(12).map((_, i) => (i * 1_237) & 0xfff);
-  const file = encodeEarth(header, { octahedral, values, infos, seasons });
+  const wideDepths = new Uint8Array(12).map((_, i) => i % 16);
+  const file = encodeEarth(header, { octahedral, values, infos, seasons, wideDepths });
 
   it("reads back what was written", () => {
     const points = decodeEarth(file);
@@ -83,6 +84,7 @@ describe("earth file", () => {
       expect(points.kinds[i]).toBe(infos[i]! & 3);
       expect(points.biomes[i]).toBe(infos[i]! >> 2);
       expect(points.seasons[i]).toBe(seasons[i]);
+      expect(points.wideDepths[i]).toBe(wideDepths[i]);
     }
   });
 
@@ -107,7 +109,7 @@ describe("earth file", () => {
     );
     const damaged = encodeEarth(
       { ...header, levels: [4, 12, 7] },
-      { octahedral, values, infos, seasons },
+      { octahedral, values, infos, seasons, wideDepths },
     );
     expect(() => decodeEarth(damaged)).toThrow(/damaged header/);
   });
@@ -370,6 +372,59 @@ describe("seasons", () => {
     expect(seasonPosition(new Date("2026-07-16T12:00:00Z"))).toBeCloseTo(6, 1);
     expect(seasonPosition(new Date("2026-07-01T00:00:00Z"))).toBeCloseTo(5.46, 1);
     expect(seasonPosition(new Date("2026-12-31T23:59:59Z"))).toBeCloseTo(11.5, 1);
+  });
+});
+
+describe("sea colors", () => {
+  const points = decodeEarth(inflateSync(new Uint8Array(readFileSync("public/data/earth.bin"))));
+  const july = new Date("2026-07-15T12:00:00Z");
+
+  /**
+   * Open-water faces centered in a box of latitude and longitude, optionally only those
+   * over about 190 km across, and how many of them have the bright color of shallow water.
+   */
+  const shallowLooking = (count: number, box: number[], bigOnly: boolean) => {
+    const [south = 0, north = 0, west = 0, east = 0] = box;
+    const { positions, colors } = buildEarthArrays(points, count, july);
+    let total = 0;
+    let shallow = 0;
+    for (let f = 0; f < positions.length / 9; f++) {
+      if (colors[f * 12 + 3] !== 255) continue;
+      const o = f * 9;
+      const corner = (k: number) =>
+        [positions[o + k * 3]!, positions[o + k * 3 + 1]!, positions[o + k * 3 + 2]!] as const;
+      const [a, b, c] = [corner(0), corner(1), corner(2)];
+      const { lat, lon } = vec3ToLatLon(a[0] + b[0] + c[0], a[1] + b[1] + c[1], a[2] + b[2] + c[2]);
+      if (lat < south || lat > north || lon < west || lon > east) continue;
+      const edge = (p: readonly number[], q: readonly number[]) =>
+        Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!);
+      if (bigOnly && Math.max(edge(a, b), edge(b, c), edge(c, a)) < 0.03) continue;
+      total++;
+      // Green above this is water shallower than about 300 m.
+      if (colors[f * 12 + 1]! > 160) shallow++;
+    }
+    return { total, shallow };
+  };
+
+  it("keeps the light globe's open sea deep off a steep coast", () => {
+    // Off East Africa and in the Mozambique Channel the sea is thousands of meters deep a
+    // few dozen kilometers out. The light globe's big faces once spread the shallows over it.
+    const { total, shallow } = shallowLooking(points.header.tiers.low, [-26, -2, 36, 46], true);
+    expect(total).toBeGreaterThan(20);
+    expect(shallow / total).toBeLessThan(0.1);
+  });
+
+  it("keeps a wide shelf light on every globe", () => {
+    // The Patagonian shelf stays shallower than 200 m for hundreds of kilometers.
+    for (const tier of ["low", "medium", "high"] as const) {
+      const { total, shallow } = shallowLooking(
+        points.header.tiers[tier],
+        [-52, -40, -66, -58],
+        false,
+      );
+      expect(total).toBeGreaterThan(20);
+      expect(shallow / total).toBeGreaterThan(0.8);
+    }
   });
 });
 

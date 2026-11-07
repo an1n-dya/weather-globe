@@ -39,6 +39,7 @@ import {
   encodeEarth,
   encodeHeight,
   encodeOctahedral,
+  encodeWideDepth,
   packInfo,
 } from "../src/globe/earthData";
 import { cachedDownload, cachedJson, naturalEarth, root } from "./lib/download";
@@ -57,6 +58,9 @@ const COAST_CLEARANCE_KM = COAST_OFFSET_KM * 2.2;
 const MIN_LAKE_KM2 = 2500;
 /** Coarse to fine. A prefix of levels is a complete, evenly spread globe. */
 const LEVEL_SCALES = [4, 2.83, 2, 1.41, 1];
+/** The light globe is made of the points of levels 0 and 1; medium adds 2 and 3. */
+const LIGHT_LEVEL = 1;
+const MEDIUM_LEVEL = 3;
 
 const SURFACE_W = 16384;
 const SURFACE_H = 8192;
@@ -887,6 +891,25 @@ async function main() {
   }
   log("measured lake and sea ice");
 
+  // The sea across a wide patch, for the light globe's big faces: a point by the shore
+  // tells only of the shallows beside it, and the water a hundred kilometers out may be
+  // deep. Finer globes' faces near the shore are small, so their own points go without (0).
+  const wideDepths = new Uint8Array(count);
+  for (let i = 0; i < count; i++) {
+    if (kinds[i] !== SURFACE.ocean || levels[i]! > LIGHT_LEVEL) continue;
+    let sum = 0;
+    let n = 0;
+    for (const { lat, lon } of footprintOf(i, 150)) {
+      const h = etopo.at(lat, lon);
+      if (h < 0) {
+        sum += h;
+        n++;
+      }
+    }
+    wideDepths[i] = Math.max(1, encodeWideDepth(n ? -sum / n : -heights[i]!));
+  }
+  log("measured the wider sea");
+
   // Order: by level, then along a space-filling curve within each, which compresses well.
   const octa = new Uint16Array(count * 2);
   for (let i = 0; i < count; i++) {
@@ -910,8 +933,10 @@ async function main() {
   const values = new Uint8Array(count);
   const infos = new Uint8Array(count);
   const seasonsInOrder = new Uint16Array(count);
+  const wideDepthsInOrder = new Uint8Array(count);
   order.forEach((source, i) => {
     seasonsInOrder[i] = seasons[source]!;
+    wideDepthsInOrder[i] = wideDepths[source]!;
     positions[i * 2] = octa[source * 2]!;
     positions[i * 2 + 1] = octa[source * 2 + 1]!;
     const kind = kinds[source]!;
@@ -923,13 +948,18 @@ async function main() {
   const header: EarthHeader = {
     count,
     levels: levelEnds,
-    tiers: { low: levelEnds[1]!, medium: levelEnds[3]!, high: levelEnds[4]! },
+    tiers: {
+      low: levelEnds[LIGHT_LEVEL]!,
+      medium: levelEnds[MEDIUM_LEVEL]!,
+      high: levelEnds[LEVEL_SCALES.length - 1]!,
+    },
   };
   const file = encodeEarth(header, {
     octahedral: positions,
     values,
     infos,
     seasons: seasonsInOrder,
+    wideDepths: wideDepthsInOrder,
   });
   const packed = deflateSync(file, { level: 9 });
   writeFileSync(join(root, "public", "data", "earth.bin"), packed);

@@ -1214,34 +1214,42 @@ button:disabled {
 }
 
 /* Loading placeholders */
-.skeleton-text,
-.skeleton-block {
+.skeleton-text {
   animation: pulse 1.3s ease-in-out infinite;
 }
-.skeleton-stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+/* The forecast's own sections holding a typical forecast, each value drawn as a block. */
+.weather-skeleton {
+  /* Its sections sit in the panel's own column, spaced exactly like the real ones. */
+  display: contents;
+  pointer-events: none;
+  user-select: none;
 }
-.skeleton-row {
-  display: flex;
-  gap: 6px;
-  margin-bottom: var(--space-3);
-}
-.skeleton-block {
-  border-radius: var(--radius-m);
+.weather-skeleton
+  :is(.status-line span, .hourly li > span, .daily-list li > span, .detail dd > span) {
+  border-radius: var(--radius-s);
   background: var(--surface-raised);
+  color: transparent;
+  animation: pulse 1.3s ease-in-out infinite;
 }
-.skeleton-block.is-title {
-  width: 40%;
-  height: 12px;
+.weather-skeleton :is(.hourly li > span, .daily-list li > span):empty {
+  background: none;
 }
-.skeleton-block.is-hour {
-  flex: 1;
-  height: 92px;
+.weather-skeleton img {
+  /* The picture moves out of its box; the box stays, as a placeholder. */
+  object-position: 0 200px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  animation: pulse 1.3s ease-in-out infinite;
 }
-.skeleton-block.is-line {
-  height: 30px;
+.weather-skeleton :is(.section-title, .detail dt) {
+  opacity: 0.55;
+}
+.weather-skeleton[data-still] :is(span, img) {
+  animation: none;
+  opacity: 0.6;
+}
+.weather-skeleton :is(.hourly-page, .wind-arrow, .daily-bar, .daily-now, .uv-scale > span) {
+  visibility: hidden;
 }
 
 @keyframes pulse {

@@ -3,7 +3,7 @@
  * writes it, and the globe, which reads it. The file is one DEFLATE stream;
  * inflated, it holds:
  *
- *   "WGE3", header length (u32 LE), header JSON padded to 4 bytes, then one
+ *   "WGE4", header length (u32 LE), header JSON padded to 4 bytes, then one
  *   block per sampling level, coarse to fine. A block of n points holds
  *   u, low bytes    n x u8 \
  *   u, high bytes   n x u8  |  octahedral unit vectors, each stored as the
@@ -11,8 +11,10 @@
  *   v, high bytes   n x u8 /   block, modulo 65,536
  *   values          n x u8   height (land, lakes) or depth (ocean), square-root coded
  *   infos           n x u8   surface kind in bits 0-1, biome in bits 2-5
- *   seasons, low    n x u8 \  one bit per month, January in bit 0: snow on land,
- *   seasons, high   n x u8 /   ice on lakes and seas
+ *   seasons, low    n x u8 \  bits 0-11: one per month, January first: snow on
+ *   seasons, high   n x u8 /   land, ice on lakes and seas. Bits 12-15: for the
+ *                              light globe's sea points, the mean depth within
+ *                              150 km, square-root coded; 0 for all others
  *
  * Points within a level follow a space-filling curve, so neighbors are close
  * and the differences small. Because levels come in order, a prefix of the
@@ -20,7 +22,7 @@
  * arrive in the first fifth of the download, make the light globe.
  */
 
-export const EARTH_MAGIC = "WGE3";
+export const EARTH_MAGIC = "WGE4";
 
 export type DetailTier = "low" | "medium" | "high";
 
@@ -72,6 +74,15 @@ export function decodeDepth(code: number): number {
   return MAX_DEPTH_M * (code / 255) ** 2;
 }
 
+/** The depth across a wide patch of sea, in sixteen square-root steps. */
+export function encodeWideDepth(meters: number): number {
+  return Math.round(15 * Math.sqrt(Math.min(MAX_DEPTH_M, Math.max(0, meters)) / MAX_DEPTH_M));
+}
+
+export function decodeWideDepth(code: number): number {
+  return MAX_DEPTH_M * (code / 15) ** 2;
+}
+
 export function packInfo(kind: Kind, biome: number): number {
   return (kind & 3) | ((biome & 15) << 2);
 }
@@ -118,6 +129,11 @@ export interface EarthPoints {
   biomes: Uint8Array;
   /** The months with snow or ice, one bit each, January in bit 0. */
   seasons: Uint16Array;
+  /**
+   * For the light globe's sea points, the mean depth within 150 km, coded by
+   * encodeWideDepth; 0 for all other points, whose own depth will do.
+   */
+  wideDepths: Uint8Array;
 }
 
 /** What the build writes for each point, in file order. */
@@ -127,6 +143,7 @@ export interface EncodedPoints {
   values: Uint8Array;
   infos: Uint8Array;
   seasons: Uint16Array;
+  wideDepths: Uint8Array;
 }
 
 /** Bytes per point in the file. */
@@ -163,7 +180,8 @@ export function encodeEarth(header: EarthHeader, points: EncodedPoints): Uint8Ar
     file.set(points.values.subarray(start, end), offset + 4 * n);
     file.set(points.infos.subarray(start, end), offset + 5 * n);
     for (let k = 0; k < n; k++) {
-      const season = points.seasons[start + k]!;
+      const season =
+        (points.seasons[start + k]! & 0xfff) | ((points.wideDepths[start + k]! & 15) << 12);
       file[offset + 6 * n + k] = season & 0xff;
       file[offset + 7 * n + k] = season >> 8;
     }
@@ -245,6 +263,7 @@ export class EarthDecoder {
       kinds: new Uint8Array(count),
       biomes: new Uint8Array(count),
       seasons: new Uint16Array(count),
+      wideDepths: new Uint8Array(count),
     };
   }
 
@@ -270,7 +289,9 @@ export class EarthDecoder {
         const info = bytes[base + 5 * n + k]!;
         points.kinds[i] = info & 3;
         points.biomes[i] = info >> 2;
-        points.seasons[i] = bytes[base + 6 * n + k]! | (bytes[base + 7 * n + k]! << 8);
+        const extra = bytes[base + 6 * n + k]! | (bytes[base + 7 * n + k]! << 8);
+        points.seasons[i] = extra & 0xfff;
+        points.wideDepths[i] = extra >> 12;
       }
       this.offset = base + POINT_BYTES * n;
       this.decoded = start + n;
