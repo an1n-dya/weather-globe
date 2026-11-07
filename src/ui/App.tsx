@@ -7,7 +7,8 @@ import {
   resetView,
   startApp,
 } from "../controller";
-import { earthFile } from "../globe/earthFile";
+import { afterFirstPaint } from "../firstPaint";
+import { earthLoader } from "../globe/earthLoader";
 import type { GlobeScene, Insets } from "../globe/scene";
 import { forecastForSelection, useStore } from "../store";
 import { initialView } from "../urlState";
@@ -126,11 +127,13 @@ export function App() {
     let cancelled = false;
     let teardown: (() => void) | undefined;
 
-    // The globe's data downloads while three.js does. Errors surface when the scene asks for it.
-    if (typeof WebGL2RenderingContext !== "undefined") earthFile().catch(() => {});
-
-    // Loaded separately so the time and weather appear before three.js arrives.
-    import("../globe/scene")
+    // Once the time and place are on screen, three.js loads; meanwhile the globe's
+    // data downloads and its light version is built.
+    afterFirstPaint()
+      .then(() => {
+        if (typeof WebGL2RenderingContext !== "undefined") earthLoader();
+        return import("../globe/scene");
+      })
       .then(({ GlobeScene }) => {
         if (cancelled) return;
         // Where the view is now (a search may already have moved it), at the shared

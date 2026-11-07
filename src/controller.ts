@@ -1,4 +1,5 @@
 import majorCitiesJson from "./data/majorCities.json";
+import { afterFirstPaint } from "./firstPaint";
 import { angularDistanceDeg, clampViewLat } from "./geo/coords";
 import { countryName, loadPlaceIndex, type Place, type PlaceIndex } from "./geo/places";
 import { isSunUp } from "./geo/sun";
@@ -243,8 +244,9 @@ export function startApp(): () => void {
   const { lat, lon } = useStore.getState();
   forecastLoader.select(lat, lon);
 
-  // Lazy-loaded: names and night lights arrive without delaying anything else.
-  void loadPlaceIndex()
+  // Names and night lights download once the first paint is on screen.
+  void afterFirstPaint()
+    .then(loadPlaceIndex)
     .then(({ index, cities }) => {
       if (stopped) return;
       placeIndex = index;

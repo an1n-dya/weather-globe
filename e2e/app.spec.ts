@@ -740,17 +740,110 @@ test("Enter picks the first result even before it arrives, and Escape clears", a
 
 test("the globe loads a light version first, then the full one", async ({ page, isMobile }) => {
   await mockApi(page);
-  await page.goto("/#20.00,0.00");
+  // Every detail level the globe shows, in order.
+  await page.addInitScript(() => {
+    const seen: string[] = [];
+    (window as unknown as { faces: string[] }).faces = seen;
+    new MutationObserver((records) => {
+      for (const record of records) {
+        const value = (record.target as Element).getAttribute("data-faces");
+        if (value && seen.at(-1) !== value) seen.push(value);
+      }
+    }).observe(document, { attributes: true, subtree: true, attributeFilter: ["data-faces"] });
+  });
   const stage = page.getByTestId("stage");
+  const shown = () =>
+    page.evaluate(() => (window as unknown as { faces: string[] }).faces.map(Number));
+
+  await page.goto("/?detail=high#20.00,0.00");
   await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
-  const faces = Number(await stage.getAttribute("data-faces"));
-  // Desktops get the full globe; phones the medium one, or the light one when they
-  // report few cores (as an emulated phone on a small test machine does).
-  expect(faces).toBeGreaterThan(isMobile ? 25_000 : 150_000);
+  const steps = await shown();
+  expect(steps[0]).toBeLessThan(40_000);
+  expect(steps.at(-1)).toBeGreaterThan(150_000);
 
   await page.goto("/?detail=low#20.00,0.00");
+  await page.reload();
   await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
+  expect(await shown()).toEqual([expect.any(Number)]);
   expect(Number(await stage.getAttribute("data-faces"))).toBeLessThan(40_000);
+
+  // Left to choose, a graphics card gets the full globe on a desktop, or the medium one on a
+  // phone (the light one when it reports few cores, as an emulated phone on a small machine
+  // does). Drawn by the CPU, as in most of these test browsers, the light one is enough.
+  await page.goto("/#20.00,0.00");
+  await page.reload();
+  await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
+  const faces = Number(await stage.getAttribute("data-faces"));
+  if ((await stage.getAttribute("data-renderer")) === "software")
+    expect(faces).toBeLessThan(40_000);
+  else expect(faces).toBeGreaterThan(isMobile ? 25_000 : 150_000);
+});
+
+test("starts without console errors or warnings", async ({ page }) => {
+  const messages: string[] = [];
+  page.on("console", (message) => {
+    // The test runner blocks the service worker, and says so; visitors never see that.
+    if (message.text().includes("blocked by Playwright")) return;
+    if (message.type() === "error" || message.type() === "warning") {
+      messages.push(`${message.type()}: ${message.text()}`);
+    }
+  });
+  page.on("pageerror", (error) => messages.push(`uncaught: ${error.message}`));
+  await mockApi(page);
+  await page.goto("/#35.68,139.69");
+  await globeReady(page);
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId("stage")).toHaveAttribute("data-globe", "ready", {
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(500);
+  expect(messages).toEqual([]);
+});
+
+test.describe("with the service worker", () => {
+  test.use({ serviceWorkers: "allow" });
+
+  test("after a first visit the app opens offline, without downloading its data twice", async ({
+    page,
+    context,
+    browserName,
+  }) => {
+    test.skip(browserName !== "chromium", "Service worker routing is reliable in Chromium");
+    await context.route("https://*.open-meteo.com/**", (route) => route.abort());
+    // The large files aren't stored as the worker installs, which on a first visit would
+    // download them a second time alongside the page.
+    const worker = await (await page.request.get("/sw.js")).text();
+    expect(worker).toContain("precacheAndRoute");
+    expect(worker).not.toMatch(/url:"[^"]*(\.bin|scene-)/);
+    // The worker arrives late, after the page has fetched everything itself.
+    await context.route("**/sw.js", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await route.continue();
+    });
+    await page.goto("/#20.00,0.00");
+    const stage = page.getByTestId("stage");
+    await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
+    await expect(page.getByTestId("place-name")).not.toHaveText("Locating…");
+    const kept = () =>
+      page.evaluate(async () => {
+        const names: string[] = [];
+        for (const key of await caches.keys()) {
+          for (const request of await (await caches.open(key)).keys()) {
+            names.push(new URL(request.url).pathname.split("/").pop() ?? "");
+          }
+        }
+        return names.filter((name) => /\.bin$|^scene-/.test(name)).sort();
+      });
+    await expect
+      .poll(kept, { timeout: 20_000 })
+      .toEqual(["cities.bin", "earth.bin", "regions.bin", expect.stringMatching(/^scene-/)]);
+
+    await context.setOffline(true);
+    await page.reload();
+    await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
+    await expect(page.getByTestId("place-name")).not.toHaveText("Locating…");
+    await expect(page.getByTestId("clock")).toBeVisible();
+  });
 });
 
 test("the panel shows the week, the conditions and the sun", async ({ page, isMobile }) => {

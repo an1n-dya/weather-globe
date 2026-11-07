@@ -34,9 +34,9 @@ import { SURFACE } from "../src/geo/regions";
 import {
   BIOME,
   type Biome,
-  EARTH_MAGIC,
   type EarthHeader,
   encodeDepth,
+  encodeEarth,
   encodeHeight,
   encodeOctahedral,
   packInfo,
@@ -793,17 +793,7 @@ async function main() {
     levels: levelEnds,
     tiers: { low: levelEnds[1]!, medium: levelEnds[3]!, high: levelEnds[4]! },
   };
-  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
-  const headerLength = Math.ceil(headerBytes.length / 4) * 4;
-  const body = 8 + headerLength;
-  const file = new Uint8Array(body + positions.byteLength + values.length + infos.length);
-  file.set(new TextEncoder().encode(EARTH_MAGIC), 0);
-  new DataView(file.buffer).setUint32(4, headerLength, true);
-  file.set(headerBytes, 8);
-  file.fill(0x20, 8 + headerBytes.length, body);
-  file.set(new Uint8Array(positions.buffer), body);
-  file.set(values, body + positions.byteLength);
-  file.set(infos, body + positions.byteLength + values.length);
+  const file = encodeEarth(header, { octahedral: positions, values, infos });
   const packed = deflateSync(file, { level: 9 });
   writeFileSync(join(root, "public", "data", "earth.bin"), packed);
 

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
-import { inflateSync } from "fflate";
+import { deflateSync, inflateSync } from "fflate";
 import { PerspectiveCamera } from "three";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { latLonToVec3 } from "../src/geo/coords";
 import {
   decay,
@@ -13,8 +13,16 @@ import {
   scaledDistance,
   wheelZoomFactor,
 } from "../src/globe/camera";
-import { decodeEarth, decodeOctahedral, encodeOctahedral } from "../src/globe/earthData";
+import {
+  decodeEarth,
+  decodeOctahedral,
+  EarthDecoder,
+  type EarthHeader,
+  encodeEarth,
+  encodeOctahedral,
+} from "../src/globe/earthData";
 import { buildEarthArrays, triangulateSphere } from "../src/globe/earthMesh";
+import { createInflater } from "../src/inflate";
 import { realRegions } from "./helpers/regions";
 
 describe("land data", () => {
@@ -44,6 +52,92 @@ describe("land data", () => {
     ["Caspian Sea", 42, 50.5],
   ])("%s is water", (_name, lat, lon) => {
     expect(index.isLand(lat, lon)).toBe(false);
+  });
+});
+
+describe("earth file", () => {
+  // A small file: three levels of 4, 3 and 5 points.
+  const header: EarthHeader = {
+    count: 12,
+    levels: [4, 7, 12],
+    tiers: { low: 4, medium: 7, high: 12 },
+  };
+  const octahedral = new Uint16Array(24).map((_, i) => (i * 40_503 + 11) % 65_536);
+  const values = new Uint8Array(12).map((_, i) => i * 20);
+  const infos = new Uint8Array(12).map((_, i) => (i % 4) | ((i % 13) << 2));
+  const file = encodeEarth(header, { octahedral, values, infos });
+
+  it("reads back what was written", () => {
+    const points = decodeEarth(file);
+    expect(points.header).toEqual(header);
+    for (let i = 0; i < 12; i++) {
+      const [x, y, z] = decodeOctahedral(octahedral[i * 2]!, octahedral[i * 2 + 1]!);
+      expect([...points.positions.subarray(i * 3, i * 3 + 3)]).toEqual([x, y, z]);
+      expect(points.values[i]).toBe(values[i]);
+      expect(points.kinds[i]).toBe(infos[i]! & 3);
+      expect(points.biomes[i]).toBe(infos[i]! >> 2);
+    }
+  });
+
+  it("decodes each level as soon as it has arrived", () => {
+    const decoder = new EarthDecoder();
+    const ready: number[] = [];
+    for (let i = 0; i < file.length; i++) {
+      decoder.push(file.subarray(i, i + 1));
+      if (ready.at(-1) !== decoder.decoded) ready.push(decoder.decoded);
+    }
+    expect(ready).toEqual([0, 4, 7, 12]);
+    expect(decoder.finish().values).toEqual(decodeEarth(file).values);
+  });
+
+  it("refuses a file that is cut short, damaged or not an earth file", () => {
+    const short = new EarthDecoder();
+    short.push(file.subarray(0, file.length - 1));
+    expect(short.decoded).toBe(7);
+    expect(() => short.finish()).toThrow(/truncated/);
+    expect(() => decodeEarth(new TextEncoder().encode("WGE1 an older file"))).toThrow(
+      /Not an earth file/,
+    );
+    const damaged = encodeEarth({ ...header, levels: [4, 12, 7] }, { octahedral, values, infos });
+    expect(() => decodeEarth(damaged)).toThrow(/damaged header/);
+  });
+
+  it("inflates a stream piece by piece, and reports damage at the end", async () => {
+    const compressed = deflateSync(file, { level: 9 });
+    const out: Uint8Array[] = [];
+    const inflater = await createInflater((chunk) => out.push(chunk.slice()));
+    for (let i = 0; i < compressed.length; i += 7) inflater.push(compressed.slice(i, i + 7));
+    await inflater.end();
+    const joined = new Uint8Array(out.reduce((n, c) => n + c.length, 0));
+    let offset = 0;
+    for (const chunk of out) {
+      joined.set(chunk, offset);
+      offset += chunk.length;
+    }
+    expect(joined).toEqual(file);
+
+    const broken = await createInflater(() => {});
+    broken.push(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x00, 0x12]));
+    await expect(broken.end()).rejects.toThrow();
+  });
+
+  it("inflates a stream with fflate where the browser can't", async () => {
+    vi.stubGlobal("DecompressionStream", undefined);
+    try {
+      const compressed = deflateSync(file, { level: 9 });
+      let length = 0;
+      const inflater = await createInflater((chunk) => {
+        length += chunk.length;
+      });
+      for (let i = 0; i < compressed.length; i += 5) inflater.push(compressed.slice(i, i + 5));
+      await inflater.end();
+      expect(length).toBe(file.length);
+      const broken = await createInflater(() => {});
+      broken.push(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x00, 0x12]));
+      await expect(broken.end()).rejects.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

@@ -52,11 +52,36 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // The app shell and map data work offline. Weather always goes to the network.
-        globPatterns: ["**/*.{js,css,html,svg,png,bin,json}"],
-        // The share card is only for link previews.
-        globIgnores: ["og.jpg"],
-        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+        // The app shell is stored as the service worker installs, so it opens offline.
+        // Weather always goes to the network.
+        globPatterns: ["**/*.{js,css,html,svg,png,json}"],
+        // three.js and the map data are kept as the page first uses them instead: stored
+        // at install, they were downloaded twice on a first visit, once by the page and
+        // once by the service worker. The share card is only for link previews.
+        globIgnores: ["og.jpg", "**/scene-*.js"],
+        runtimeCaching: [
+          {
+            urlPattern: /\/data\/[\w-]+\.bin$/,
+            // Served at once, and refreshed in the background for next time.
+            handler: "StaleWhileRevalidate",
+            // A copy stored by a plain fetch must also answer the app's own request.
+            options: {
+              cacheName: "map-data",
+              expiration: { maxEntries: 8 },
+              matchOptions: { ignoreVary: true },
+            },
+          },
+          {
+            urlPattern: /\/assets\/scene-[\w-]+\.js$/,
+            // Hashed, so a stored copy never goes stale; old versions are dropped.
+            handler: "CacheFirst",
+            options: {
+              cacheName: "globe-code",
+              expiration: { maxEntries: 2 },
+              matchOptions: { ignoreVary: true },
+            },
+          },
+        ],
       },
     }),
   ],
