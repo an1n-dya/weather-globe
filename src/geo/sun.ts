@@ -49,6 +49,44 @@ export function isSunUp(lat: number, lon: number, date: Date): boolean {
   return sunAltitudeDeg(lat, lon, date) > HORIZON_DEG;
 }
 
+export interface SunDay {
+  /** Minutes after local midnight, or null if the sun doesn't rise or set that day. */
+  sunrise: number | null;
+  sunset: number | null;
+  /** Minutes of daylight in the local day. */
+  daylight: number;
+  polar: "day" | "night" | null;
+}
+
+/**
+ * Sunrise, sunset and day length for the local calendar day containing `now`,
+ * found by stepping through the day. Uses the same sun as the globe's
+ * terminator, so the two always agree. `minutesNow` is the local time of day.
+ */
+export function sunDay(lat: number, lon: number, now: Date, minutesNow: number): SunDay {
+  const midnight = now.getTime() - minutesNow * 60_000;
+  const STEP = 10;
+  const altitude = (minute: number) =>
+    sunAltitudeDeg(lat, lon, new Date(midnight + minute * 60_000));
+  let sunrise: number | null = null;
+  let sunset: number | null = null;
+  let daylight = 0;
+  let previous = altitude(0) - HORIZON_DEG;
+  for (let minute = STEP; minute <= 1440; minute += STEP) {
+    const current = altitude(minute) - HORIZON_DEG;
+    // Linear interpolation is good to a minute or so at this step.
+    const crossing = minute - STEP + (STEP * previous) / (previous - current);
+    if (previous <= 0 && current > 0 && sunrise === null) sunrise = crossing;
+    if (previous > 0 && current <= 0 && sunset === null) sunset = crossing;
+    if (previous > 0 && current > 0) daylight += STEP;
+    else if (previous > 0 || current > 0)
+      daylight += previous > 0 ? crossing - (minute - STEP) : minute - crossing;
+    previous = current;
+  }
+  const polar = sunrise === null && sunset === null ? (daylight > 0 ? "day" : "night") : null;
+  return { sunrise, sunset, daylight: Math.round(daylight), polar };
+}
+
 /**
  * Whether the sun stays up all day ("day"), stays down all day ("night"), or
  * rises and sets (null), from its highest and lowest heights on that date.

@@ -18,11 +18,14 @@ interface ApiMock {
 
 function forecastBody(url: URL, sun: ApiMock["sun"]) {
   const lat = Number(url.searchParams.get("latitude"));
-  const zone = lat > 30 ? "Asia/Tokyo" : "Asia/Kolkata";
-  const hours = Array.from({ length: 48 }, (_, i) => {
-    const day = i < 24 ? "04" : "05";
+  const lon = Number(url.searchParams.get("longitude"));
+  const nearKathmandu = Math.abs(lat - 27.7) < 1 && Math.abs(lon - 85.3) < 1;
+  const zone = lat > 30 ? "Asia/Tokyo" : nearKathmandu ? "Asia/Kathmandu" : "Asia/Kolkata";
+  const hours = Array.from({ length: 7 * 24 }, (_, i) => {
+    const day = String(4 + Math.floor(i / 24)).padStart(2, "0");
     return `2026-11-${day}T${String(i % 24).padStart(2, "0")}:00`;
   });
+  const days = Array.from({ length: 7 }, (_, i) => `2026-11-${String(4 + i).padStart(2, "0")}`);
   return {
     timezone: zone,
     current: {
@@ -30,20 +33,34 @@ function forecastBody(url: URL, sun: ApiMock["sun"]) {
       temperature_2m: 27.4,
       apparent_temperature: 29.1,
       relative_humidity_2m: 61,
+      dew_point_2m: 19.2,
       wind_speed_10m: 12,
+      wind_direction_10m: 225,
+      wind_gusts_10m: 30,
       weather_code: 2,
       is_day: 1,
+      pressure_msl: 1012.6,
+      cloud_cover: 40,
+      visibility: 24_000,
+      uv_index: 6.2,
     },
     hourly: {
       time: hours,
       temperature_2m: hours.map((_, i) => 20 + (i % 10)),
       weather_code: hours.map((_, i) => [0, 2, 3, 61, 95][i % 5]),
       is_day: hours.map((_, i) => (i % 24 >= 6 && i % 24 < 18 ? 1 : 0)),
+      precipitation_probability: hours.map((_, i) => (i * 7) % 100),
     },
     daily: {
-      time: ["2026-11-04", "2026-11-05"],
-      sunrise: sun?.sunrise ?? ["2026-11-04T05:42", "2026-11-05T05:43"],
-      sunset: sun?.sunset ?? ["2026-11-04T16:58", "2026-11-05T16:57"],
+      time: days,
+      weather_code: days.map((_, i) => [1, 61, 3, 0, 95, 2, 71][i]),
+      temperature_2m_max: days.map((_, i) => 30 - i),
+      temperature_2m_min: days.map((_, i) => 20 - i),
+      precipitation_probability_max: days.map((_, i) => i * 12),
+      uv_index_max: days.map(() => 7),
+      daylight_duration: days.map(() => 40_000),
+      sunrise: sun?.sunrise ?? days.map((d) => `${d}T05:42`),
+      sunset: sun?.sunset ?? days.map((d) => `${d}T16:58`),
     },
   };
 }
@@ -92,6 +109,8 @@ async function mockApi(page: Page): Promise<ApiMock> {
             name: "Kathmandu",
             admin1: "Bagmati",
             country: "Nepal",
+            country_code: "NP",
+            timezone: "Asia/Kathmandu",
             latitude: 27.7,
             longitude: 85.32,
           },
@@ -319,16 +338,53 @@ test("opening in a hidden window starts correctly once it is shown", async ({ pa
   expect(errors).toEqual([]);
 });
 
-test("the mobile sheet expands to show details", async ({ page, isMobile }, info) => {
+test("the mobile sheet steps from collapsed to half to full and back", async ({
+  page,
+  isMobile,
+}, info) => {
   test.skip(!isMobile, "Phone layout only");
   await mockApi(page);
   await page.goto("/#28.61,77.21");
   await globeReady(page);
   await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  const panel = page.locator(".panel");
+  await expect(panel).toHaveAttribute("data-sheet", "collapsed");
   await expect(page.getByText("Humidity")).toBeHidden();
+
   await page.getByRole("button", { name: "Show more" }).click();
+  await expect(panel).toHaveAttribute("data-sheet", "half");
   await expect(page.getByText("Humidity")).toBeVisible();
+  // The globe moves up to stay in view above the sheet.
+  const reticle = await page.locator(".reticle").boundingBox();
+  const sheetTop = (await panel.boundingBox())?.y ?? 0;
+  await expect
+    .poll(async () => (await page.locator(".reticle").boundingBox())?.y ?? 0)
+    .toBeLessThan(sheetTop);
+  expect(reticle).not.toBeNull();
+
+  await page.getByRole("button", { name: "Show more" }).click();
+  await expect(panel).toHaveAttribute("data-sheet", "full");
+  await expect(page.locator(".map-controls")).toBeHidden();
   await page.screenshot({ path: `${SHOTS}/${info.project.name}-4-expanded.png` });
+  await page.getByRole("button", { name: "Show less" }).click();
+  await expect(panel).toHaveAttribute("data-sheet", "collapsed");
+});
+
+test("dragging the sheet handle up opens it", async ({ page, isMobile }) => {
+  test.skip(!isMobile, "Phone layout only");
+  await mockApi(page);
+  await page.goto("/#28.61,77.21");
+  await globeReady(page);
+  const handle = page.locator(".sheet-handle");
+  const box = await handle.boundingBox();
+  if (!box) throw new Error("No sheet handle");
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  for (let i = 1; i <= 8; i++) await page.mouse.move(x, y - i * 40);
+  await page.mouse.up();
+  await expect(page.locator(".panel")).not.toHaveAttribute("data-sheet", "collapsed");
 });
 
 test("without WebGL, search and the panel still work", async ({ page }) => {
@@ -544,7 +600,10 @@ test("there are no accessibility violations", async ({ page }, info) => {
   await page.goto("/#35.68,139.69");
   await globeReady(page);
   await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
-  if (info.project.name === "mobile") await page.getByRole("button", { name: "Show more" }).click();
+  if (info.project.name === "mobile" || info.project.name === "iphone") {
+    await page.getByRole("button", { name: "Show more" }).click();
+    await page.getByRole("button", { name: "Show more" }).click();
+  }
 
   const results = await new AxeBuilder({ page }).analyze();
   const summary = results.violations.map(
@@ -657,4 +716,156 @@ test("the globe loads a light version first, then the full one", async ({ page, 
   await page.goto("/?detail=low#20.00,0.00");
   await expect(stage).toHaveAttribute("data-globe", "ready", { timeout: 30_000 });
   expect(Number(await stage.getAttribute("data-faces"))).toBeLessThan(40_000);
+});
+
+test("the panel shows the week, the conditions and the sun", async ({ page, isMobile }) => {
+  await mockApi(page);
+  await page.goto("/#35.68,139.69");
+  await globeReady(page);
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  if (isMobile) await page.getByRole("button", { name: "Show more" }).click();
+  const week = page.getByRole("region", { name: "7-day forecast" });
+  await expect(week.getByRole("listitem")).toHaveCount(7);
+  await expect(week.getByRole("listitem").first()).toHaveAccessibleName(/^Today: Mainly clear/);
+  const conditions = page.getByRole("region", { name: "Conditions" });
+  await expect(conditions).toContainText("UV index");
+  await expect(conditions).toContainText("High");
+  await expect(conditions).toContainText("From the southwest");
+  // 24 km, or 15 mi where the locale uses miles.
+  await expect(conditions).toContainText(/24 km|15 mi/);
+  await expect(page.getByRole("region", { name: "Sun" })).toContainText("Daylight");
+  await expect(page.getByTestId("summary")).toContainText("partly cloudy");
+});
+
+test("wind units switch, and the choice survives a reload", async ({ page, isMobile }) => {
+  await mockApi(page);
+  await page.goto("/#35.68,139.69");
+  await globeReady(page);
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  if (isMobile) {
+    await page.getByRole("button", { name: "Show more" }).click();
+    await page.getByRole("button", { name: "Show more" }).click();
+  }
+  const conditions = page.getByRole("region", { name: "Conditions" });
+  await page.getByRole("button", { name: "Meters per second" }).click();
+  await expect(conditions).toContainText("3 m/s");
+  await page.reload();
+  await globeReady(page);
+  if (isMobile) {
+    await page.getByRole("button", { name: "Show more" }).click();
+    await page.getByRole("button", { name: "Show more" }).click();
+  }
+  await expect(page.getByRole("button", { name: "Meters per second" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
+
+test("a saved place is listed in search, after a reload too", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#35.68,139.69");
+  await globeReady(page);
+  await expect(page.getByTestId("place-name")).toHaveText("Tokyo");
+  await page.getByRole("button", { name: "Save this place" }).click();
+  await expect(page.getByRole("button", { name: "Remove from saved places" })).toBeVisible();
+  await page.reload();
+  await globeReady(page);
+  await page.getByRole("combobox", { name: "Search for a place" }).focus();
+  const saved = page.getByRole("group", { name: "Saved places" });
+  await expect(saved.getByRole("option", { name: /Tokyo/ })).toBeVisible();
+});
+
+test("searching remembers recent places", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#0,-150");
+  await globeReady(page);
+  const search = page.getByRole("combobox", { name: "Search for a place" });
+  await search.fill("Kath");
+  await expect(page.getByRole("option", { name: /Kathmandu.*Bagmati, Nepal/ })).toBeVisible();
+  await page.getByRole("option", { name: /Kathmandu/ }).click();
+  await expect(page.getByTestId("place-name")).toHaveText("Kathmandu", { timeout: 20_000 });
+  await search.focus();
+  await expect(
+    page.getByRole("group", { name: "Recent" }).getByRole("option", { name: /Kathmandu/ }),
+  ).toBeVisible();
+});
+
+test("compare shows how far apart two clocks are", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#35.68,139.69");
+  await globeReady(page);
+  await expect(page.getByTestId("place-name")).toHaveText("Tokyo");
+  await page.getByRole("button", { name: "Compare with another place" }).click();
+  await page.getByRole("combobox", { name: "Search for a place" }).fill("Kath");
+  await page.getByRole("option", { name: /Kathmandu/ }).click();
+  await expect(page.getByTestId("place-name")).toHaveText("Kathmandu", { timeout: 20_000 });
+  await expect(page.getByTestId("compare-difference")).toHaveText(
+    "Kathmandu is 3¼ hours behind Tokyo",
+  );
+  await page.getByRole("button", { name: "Stop comparing" }).first().click();
+  await expect(page.getByTestId("compare")).toBeHidden();
+});
+
+test("the share button copies a link to this view", async ({ page, browserName, isMobile }) => {
+  test.skip(browserName !== "chromium" || isMobile, "Clipboard access in desktop Chromium");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await mockApi(page);
+  await page.goto("/#35.68,139.69,2.00");
+  await globeReady(page);
+  await page.getByRole("button", { name: "Share a link to this view" }).click();
+  await expect(page.locator(".toast")).toHaveText("Link copied");
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toMatch(/#35\.68,139\.69,2\.00$/);
+});
+
+test("the slash key focuses search, and the home button shows the whole globe", async ({
+  page,
+  isMobile,
+}) => {
+  test.skip(isMobile, "Physical keyboard only");
+  await mockApi(page);
+  await page.goto("/#35.68,139.69,1.40");
+  await globeReady(page);
+  await page.locator("body").press("/");
+  await expect(page.getByRole("combobox", { name: "Search for a place" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Show the whole globe" }).click();
+  await expect
+    .poll(() => Number(new URL(page.url()).hash.split(",")[2]), { timeout: 10_000 })
+    .toBeGreaterThan(2.5);
+});
+
+test("zoomed out, the badges stay few and apart", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#20.00,0.00");
+  await globeReady(page);
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  await page.waitForTimeout(500);
+  const boxes = await page.evaluate(() =>
+    [...document.querySelectorAll(".city-marker.is-shown .city-marker-body")].map((element) => {
+      const r = element.getBoundingClientRect();
+      return [r.left, r.top, r.right, r.bottom];
+    }),
+  );
+  expect(boxes.length).toBeGreaterThan(3);
+  expect(boxes.length).toBeLessThanOrEqual(16);
+  const overlapping = boxes.flatMap(([l1 = 0, t1 = 0, r1 = 0, b1 = 0], i) =>
+    boxes
+      .slice(i + 1)
+      .filter(([l2 = 0, t2 = 0, r2 = 0, b2 = 0]) => l1 < r2 && r1 > l2 && t1 < b2 && b1 > t2),
+  );
+  expect(overlapping).toEqual([]);
+});
+
+test("the globe's data downloads once, started as the app boots", async ({ page }) => {
+  await mockApi(page);
+  const downloads: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/data/earth.bin")) downloads.push(request.url());
+  });
+  await page.goto("/#20.00,0.00");
+  await expect(page.getByTestId("stage")).toHaveAttribute("data-globe", "ready", {
+    timeout: 30_000,
+  });
+  expect(downloads).toHaveLength(1);
 });

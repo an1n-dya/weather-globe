@@ -15,11 +15,11 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
-import { dataUrl } from "../data";
 import { latLonToVec3, vec3ToLatLon } from "../geo/coords";
 import { sunDirection } from "../geo/sun";
 import { FOV, fitDistance, GlobeCameraRig, type GlobeView } from "./camera";
 import type { DetailTier } from "./earthData";
+import { earthFile } from "./earthFile";
 import type { EarthArrays } from "./earthMesh";
 import type { EarthReply, EarthRequest } from "./earthWorker";
 import { CityMarkers, type MarkerCity, type MarkerContent, type MarkerLayout } from "./markers";
@@ -457,9 +457,7 @@ export class GlobeScene {
     // The light globe first, then the full one, unless light is all this device gets.
     const tiers: DetailTier[] = this.detail === "low" ? ["low"] : ["low", this.detail];
     try {
-      const response = await fetch(dataUrl("earth.bin"));
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const file = await response.arrayBuffer();
+      const file = await earthFile();
       if (this.disposed) return;
       try {
         await buildEarthInWorker({ file: file.slice(0), tiers }, (tier, arrays) =>
@@ -559,7 +557,11 @@ export class GlobeScene {
       right: ease(current.right, target.right),
       bottom: ease(current.bottom, target.bottom),
     };
-    if (next.top === current.top && next.right === current.right && next.bottom === current.bottom) {
+    if (
+      next.top === current.top &&
+      next.right === current.right &&
+      next.bottom === current.bottom
+    ) {
       return false;
     }
     this.insets = next;

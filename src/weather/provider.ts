@@ -5,14 +5,31 @@
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
 const HOURS_SHOWN = 24;
+const DAYS_SHOWN = 7;
 const REQUEST_TIMEOUT_MS = 15_000;
 
-interface HourForecast {
+export interface HourForecast {
   /** Local wall-clock time at the place, e.g. 2026-11-04T13:00. */
   time: string;
   temp: number;
   code: number;
   isDay: boolean;
+  /** Chance of rain or snow, in percent. */
+  precipChance: number | null;
+}
+
+export interface DayForecast {
+  /** Local date, e.g. 2026-11-04. */
+  date: string;
+  code: number;
+  max: number;
+  min: number;
+  precipChance: number | null;
+  sunrise: string | null;
+  sunset: string | null;
+  uvMax: number | null;
+  /** Seconds of daylight; 0 in polar night and 86,400 in polar day. */
+  daylight: number | null;
 }
 
 export interface Forecast {
@@ -23,13 +40,28 @@ export interface Forecast {
     temp: number;
     feelsLike: number;
     humidity: number;
+    /** km/h. */
     wind: number;
     code: number;
     isDay: boolean;
+    /** Degrees the wind comes from, clockwise from north. */
+    windDirection: number | null;
+    windGusts: number | null;
+    dewPoint: number | null;
+    /** Sea-level pressure, hPa. */
+    pressure: number | null;
+    /** Percent. */
+    cloudCover: number | null;
+    /** Meters. */
+    visibility: number | null;
+    uvIndex: number | null;
   };
   hourly: HourForecast[];
+  daily: DayForecast[];
+  /** Today's, at the place. */
   sunrise: string | null;
   sunset: string | null;
+  daylight: number | null;
 }
 
 export interface CityCurrent {
@@ -42,6 +74,10 @@ export interface SearchResult {
   name: string;
   admin: string;
   country: string;
+  /** ISO 3166-1 alpha-2, for the flag. */
+  countryCode: string;
+  /** IANA zone, for the local time beside each result. */
+  timezone: string;
   lat: number;
   lon: number;
 }
@@ -115,9 +151,11 @@ function requireNumbers(...values: unknown[]): void {
   }
 }
 
+type Series<T> = Array<T | null> | undefined;
+
 interface RawForecast {
   timezone: string;
-  current: {
+  current: Record<string, number | string | null | undefined> & {
     time: string;
     temperature_2m: number;
     apparent_temperature: number;
@@ -128,15 +166,27 @@ interface RawForecast {
   };
   hourly: {
     time: string[];
-    temperature_2m: Array<number | null>;
-    weather_code: Array<number | null>;
-    is_day: Array<number | null>;
+    temperature_2m: Series<number>;
+    weather_code: Series<number>;
+    is_day: Series<number>;
+    precipitation_probability?: Series<number>;
   };
   daily: {
     time: string[];
-    sunrise: Array<string | null>;
-    sunset: Array<string | null>;
+    sunrise: Series<string>;
+    sunset: Series<string>;
+    weather_code?: Series<number>;
+    temperature_2m_max?: Series<number>;
+    temperature_2m_min?: Series<number>;
+    precipitation_probability_max?: Series<number>;
+    uv_index_max?: Series<number>;
+    daylight_duration?: Series<number>;
   };
+}
+
+/** A finite number, or null: optional values may be missing for some places or models. */
+function optional(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /**
@@ -168,11 +218,35 @@ export function parseForecast(raw: RawForecast): Forecast {
   const currentHour = current.time.slice(0, 13);
   const hours: HourForecast[] = [];
   hourly.time.forEach((time, i) => {
-    const temp = hourly.temperature_2m[i];
-    const code = hourly.weather_code[i];
+    const temp = optional(hourly.temperature_2m?.[i]);
+    const code = optional(hourly.weather_code?.[i]);
     if (time.slice(0, 13) < currentHour || hours.length >= HOURS_SHOWN) return;
-    if (temp == null || code == null) return;
-    hours.push({ time, temp, code, isDay: hourly.is_day[i] === 1 });
+    if (temp === null || code === null) return;
+    hours.push({
+      time,
+      temp,
+      code,
+      isDay: hourly.is_day?.[i] === 1,
+      precipChance: optional(hourly.precipitation_probability?.[i]),
+    });
+  });
+
+  const days: DayForecast[] = [];
+  daily.time.forEach((date, i) => {
+    const max = optional(daily.temperature_2m_max?.[i]);
+    const min = optional(daily.temperature_2m_min?.[i]);
+    const code = optional(daily.weather_code?.[i]);
+    if (days.length >= DAYS_SHOWN || max === null || min === null || code === null) return;
+    days.push({
+      date,
+      code,
+      max,
+      min,
+      precipChance: optional(daily.precipitation_probability_max?.[i]),
+      ...sunEvents(daily.sunrise?.[i], daily.sunset?.[i], date),
+      uvMax: optional(daily.uv_index_max?.[i]),
+      daylight: optional(daily.daylight_duration?.[i]),
+    });
   });
 
   return {
@@ -185,9 +259,18 @@ export function parseForecast(raw: RawForecast): Forecast {
       wind: current.wind_speed_10m,
       code: current.weather_code,
       isDay: current.is_day === 1,
+      windDirection: optional(current.wind_direction_10m),
+      windGusts: optional(current.wind_gusts_10m),
+      dewPoint: optional(current.dew_point_2m),
+      pressure: optional(current.pressure_msl),
+      cloudCover: optional(current.cloud_cover),
+      visibility: optional(current.visibility),
+      uvIndex: optional(current.uv_index),
     },
     hourly: hours,
-    ...sunEvents(daily.sunrise[0], daily.sunset[0], daily.time[0]),
+    daily: days,
+    ...sunEvents(daily.sunrise?.[0], daily.sunset?.[0], daily.time[0]),
+    daylight: optional(daily.daylight_duration?.[0]),
   };
 }
 
@@ -199,12 +282,34 @@ export async function fetchForecast(
   const params = new URLSearchParams({
     latitude: String(lat),
     longitude: String(lon),
-    current:
-      "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day",
-    hourly: "temperature_2m,weather_code,is_day",
-    daily: "sunrise,sunset",
+    current: [
+      "temperature_2m",
+      "apparent_temperature",
+      "relative_humidity_2m",
+      "dew_point_2m",
+      "wind_speed_10m",
+      "wind_direction_10m",
+      "wind_gusts_10m",
+      "weather_code",
+      "is_day",
+      "pressure_msl",
+      "cloud_cover",
+      "visibility",
+      "uv_index",
+    ].join(","),
+    hourly: "temperature_2m,weather_code,is_day,precipitation_probability",
+    daily: [
+      "weather_code",
+      "temperature_2m_max",
+      "temperature_2m_min",
+      "precipitation_probability_max",
+      "sunrise",
+      "sunset",
+      "uv_index_max",
+      "daylight_duration",
+    ].join(","),
     timezone: "auto",
-    forecast_days: "2",
+    forecast_days: String(DAYS_SHOWN),
   });
   return parseForecast((await getJson(`${FORECAST_URL}?${params}`, signal)) as RawForecast);
 }
@@ -239,6 +344,8 @@ interface RawGeocoding {
     name: string;
     admin1?: string;
     country?: string;
+    country_code?: string;
+    timezone?: string;
     latitude: number;
     longitude: number;
   }>;
@@ -247,12 +354,16 @@ interface RawGeocoding {
 export async function searchPlaces(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const params = new URLSearchParams({ name: query, count: "6", language: "en", format: "json" });
   const raw = (await getJson(`${GEOCODING_URL}?${params}`, signal)) as RawGeocoding;
-  return (raw.results ?? []).map((r) => ({
-    id: r.id,
-    name: r.name,
-    admin: r.admin1 ?? "",
-    country: r.country ?? "",
-    lat: r.latitude,
-    lon: r.longitude,
-  }));
+  return (raw.results ?? [])
+    .filter((r) => Number.isFinite(r.latitude) && Number.isFinite(r.longitude) && r.name)
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      admin: r.admin1 ?? "",
+      country: r.country ?? "",
+      countryCode: r.country_code ?? "",
+      timezone: r.timezone ?? "",
+      lat: r.latitude,
+      lon: r.longitude,
+    }));
 }

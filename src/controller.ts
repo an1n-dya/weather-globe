@@ -5,7 +5,16 @@ import { isSunUp } from "./geo/sun";
 import type { GlobeView } from "./globe/camera";
 import type { MarkerCity } from "./globe/markers";
 import type { GlobeScene, LightPoint } from "./globe/scene";
-import { type Settings, saveSettings, useStore } from "./store";
+import {
+  addToFront,
+  MAX_FAVORITES,
+  MAX_RECENTS,
+  type SavedPlace,
+  samePlace,
+  savePlaceLists,
+} from "./savedPlaces";
+import { type Settings, saveSettings } from "./settings";
+import { useStore } from "./store";
 import { formatTemperature } from "./ui/format";
 import { iconSrc } from "./ui/icons";
 import { formatHash, parseHash, replaceHash } from "./urlState";
@@ -90,6 +99,89 @@ export function goToNamed(lat: number, lon: number, name: string, region: string
   // The camera can't reach the exact poles, so compare against where it will stop.
   namedPlace = { kind: "city", name, region, lat: clampViewLat(lat), lon };
   goTo(lat, lon, scene?.arrivalDistance);
+  rememberRecent({ name, region, lat, lon });
+}
+
+function storeLists(change: Partial<{ favorites: SavedPlace[]; recents: SavedPlace[] }>): void {
+  useStore.setState(change);
+  const { favorites, recents } = useStore.getState();
+  savePlaceLists({ favorites, recents });
+}
+
+function rememberRecent(place: SavedPlace): void {
+  storeLists({ recents: addToFront(useStore.getState().recents, place, MAX_RECENTS) });
+}
+
+export function forgetRecent(place: SavedPlace): void {
+  storeLists({ recents: useStore.getState().recents.filter((p) => !samePlace(p, place)) });
+}
+
+/** The place under the reticle, as something that can be saved or compared. */
+export function currentPlace(): SavedPlace {
+  const { lat, lon, place } = useStore.getState();
+  return { name: place.name, region: place.region, lat, lon };
+}
+
+export function isFavorite(place: { lat: number; lon: number }): boolean {
+  return useStore.getState().favorites.some((p) => samePlace(p, place));
+}
+
+export function toggleFavorite(place: SavedPlace): void {
+  const { favorites } = useStore.getState();
+  const saved = favorites.some((p) => samePlace(p, place));
+  storeLists({
+    favorites: saved
+      ? favorites.filter((p) => !samePlace(p, place))
+      : addToFront(favorites, place, MAX_FAVORITES),
+  });
+  showToast(saved ? `Removed ${place.name} from saved places` : `Saved ${place.name}`);
+}
+
+export function goToSaved(place: SavedPlace): void {
+  goToNamed(place.lat, place.lon, place.name, place.region);
+}
+
+export function setCompare(place: SavedPlace | null): void {
+  useStore.setState({ compare: place });
+}
+
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
+
+export function showToast(text: string): void {
+  clearTimeout(toastTimer);
+  useStore.setState({ toast: text });
+  toastTimer = setTimeout(() => useStore.setState({ toast: null }), 2600);
+}
+
+/** Shares a link to this view: the system share sheet on phones, the clipboard elsewhere. */
+export async function shareView(): Promise<void> {
+  const { lat, lon, distance, place } = useStore.getState();
+  const url = new URL(location.href);
+  url.hash = formatHash(lat, lon, distance);
+  const title = [place.name, place.region].filter(Boolean).join(", ");
+  const touch = matchMedia("(pointer: coarse)").matches;
+  if (touch && typeof navigator.share === "function") {
+    try {
+      await navigator.share({ title: `${title} · Weather Globe`, url: url.href });
+      return;
+    } catch (error) {
+      // Closing the share sheet isn't a failure worth mentioning.
+      if (error instanceof DOMException && error.name === "AbortError") return;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(url.href);
+    showToast("Link copied");
+  } catch {
+    showToast("Couldn't copy the link. It's in the address bar.");
+  }
+}
+
+/** Back out to the whole globe, keeping roughly the same side of the world in view. */
+export function resetView(): void {
+  const { lat, lon } = useStore.getState();
+  namedPlace = null;
+  if (scene) scene.resetView(Math.max(-35, Math.min(35, lat)), lon);
 }
 
 /** What to tell someone whose location couldn't be found, by the reason given. */
@@ -115,6 +207,7 @@ export function goToMyLocation(): void {
       useStore.setState({ notice: null, locating: false });
       namedPlace = null;
       goTo(coords.latitude, coords.longitude, scene?.arrivalDistance);
+      showToast("Showing your location");
     },
     (error) => useStore.setState({ notice: locationErrorText(error.code), locating: false }),
     { maximumAge: 10 * 60_000, timeout: 12_000 },

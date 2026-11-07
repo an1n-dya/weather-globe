@@ -8,7 +8,7 @@ import {
   vec3ToLatLon,
 } from "../src/geo/coords";
 import { type CityRow, PlaceIndex, parseCityRows } from "../src/geo/places";
-import { isSunUp, polarState, subsolarPoint, sunAltitudeDeg } from "../src/geo/sun";
+import { isSunUp, polarState, subsolarPoint, sunAltitudeDeg, sunDay } from "../src/geo/sun";
 import {
   formatDifference,
   formatDuration,
@@ -117,6 +117,20 @@ describe("sun position", () => {
     expect(polarState(-70, june)).toBe("night");
     // Just inside the Arctic Circle the sun only barely skims the horizon at midsummer.
     expect(polarState(66.6, june)).toBe("day");
+  });
+
+  it("finds the day's sunrise and sunset in local minutes", () => {
+    // London on 3 November 2026: sunrise 06:57 and sunset 16:30 GMT.
+    const noon = new Date("2026-11-03T12:00:00Z");
+    const london = sunDay(51.51, -0.13, noon, 720);
+    expect(Math.abs(london.sunrise! - (6 * 60 + 57))).toBeLessThan(3);
+    expect(Math.abs(london.sunset! - (16 * 60 + 30))).toBeLessThan(3);
+    expect(Math.abs(london.daylight - (london.sunset! - london.sunrise!))).toBeLessThan(3);
+    expect(london.polar).toBeNull();
+    const svalbard = sunDay(78.2, 15.6, new Date("2026-12-10T12:00:00Z"), 780);
+    expect(svalbard).toMatchObject({ sunrise: null, sunset: null, polar: "night", daylight: 0 });
+    const antarctic = sunDay(-78, 166, new Date("2026-12-10T00:00:00Z"), 780);
+    expect(antarctic).toMatchObject({ polar: "day", daylight: 1440 });
   });
 
   it("moves west by 15° each hour", () => {

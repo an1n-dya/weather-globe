@@ -70,10 +70,19 @@ const forecastNamed = (timezone: string): Forecast => ({
     wind: 10,
     code: 0,
     isDay: true,
+    windDirection: null,
+    windGusts: null,
+    dewPoint: null,
+    pressure: null,
+    cloudCover: null,
+    visibility: null,
+    uvIndex: null,
   },
   hourly: [],
+  daily: [],
   sunrise: null,
   sunset: null,
+  daylight: null,
 });
 
 function deferredFetcher() {
@@ -326,6 +335,38 @@ describe("forecast parsing", () => {
     });
     expect(late.sunrise).toBe("2026-11-04T02:10");
     expect(late.sunset).toBe("2026-11-05T00:20");
+  });
+
+  it("reads the week ahead, skipping days without temperatures", () => {
+    const forecast = parseForecast({
+      ...raw,
+      current: { ...raw.current, uv_index: 3.2, visibility: 24_000, pressure_msl: 1012.4 },
+      hourly: { ...raw.hourly, precipitation_probability: raw.hourly.time.map((_, i) => i) },
+      daily: {
+        time: ["2026-11-04", "2026-11-05", "2026-11-06"],
+        sunrise: ["2026-11-04T05:42", "2026-11-05T05:43", "2026-11-06T05:43"],
+        sunset: ["2026-11-04T16:58", "2026-11-05T16:57", "2026-11-06T16:57"],
+        weather_code: [1, 61, 3],
+        temperature_2m_max: [31, 28, null],
+        temperature_2m_min: [22, 21, 20],
+        precipitation_probability_max: [5, 80, 10],
+        uv_index_max: [7.1, 4, 5],
+        daylight_duration: [40_000, 39_900, 39_800],
+      },
+    });
+    expect(forecast.daily.map((d) => d.date)).toEqual(["2026-11-04", "2026-11-05"]);
+    expect(forecast.daily[1]).toMatchObject({ code: 61, max: 28, min: 21, precipChance: 80 });
+    expect(forecast.daylight).toBe(40_000);
+    expect(forecast.current).toMatchObject({ uvIndex: 3.2, visibility: 24_000, pressure: 1012.4 });
+    expect(forecast.hourly[0]?.precipChance).toBe(13);
+  });
+
+  it("leaves optional values empty when the service has none, rather than zero", () => {
+    const forecast = parseForecast(raw);
+    expect(forecast.current.uvIndex).toBeNull();
+    expect(forecast.current.windDirection).toBeNull();
+    expect(forecast.daily).toEqual([]);
+    expect(forecast.hourly[0]?.precipChance).toBeNull();
   });
 
   it("rejects a response missing a value, rather than showing it as zero", () => {

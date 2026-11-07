@@ -1,45 +1,10 @@
 import { create } from "zustand";
 import type { Place } from "./geo/places";
-import type { TempUnit } from "./ui/format";
+import { loadPlaceLists, type SavedPlace } from "./savedPlaces";
+import { loadSettings, type Settings } from "./settings";
 import { initialView } from "./urlState";
 import { snapToCell } from "./weather/cache";
 import { type ForecastState, IDLE_FORECAST } from "./weather/forecastLoader";
-
-export interface Settings {
-  unit: TempUnit;
-  hour12: boolean;
-}
-
-const SETTINGS_KEY = "weather-globe.settings.v1";
-const FAHRENHEIT_REGIONS = ["US", "BS", "BZ", "KY", "PW", "LR"];
-
-function defaultSettings(): Settings {
-  const hour12 =
-    new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12 ?? false;
-  const region = navigator.language.split("-")[1]?.toUpperCase() ?? "";
-  return { hour12, unit: FAHRENHEIT_REGIONS.includes(region) ? "f" : "c" };
-}
-
-function loadSettings(): Settings {
-  const defaults = defaultSettings();
-  try {
-    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as Partial<Settings>;
-    return {
-      unit: saved.unit === "c" || saved.unit === "f" ? saved.unit : defaults.unit,
-      hour12: typeof saved.hour12 === "boolean" ? saved.hour12 : defaults.hour12,
-    };
-  } catch {
-    return defaults;
-  }
-}
-
-export function saveSettings(settings: Settings): void {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch {
-    // Without storage the choice simply lasts for this visit.
-  }
-}
 
 export interface AppState {
   lat: number;
@@ -54,6 +19,12 @@ export interface AppState {
   notice: string | null;
   /** Waiting for the browser to report the viewer's location. */
   locating: boolean;
+  favorites: SavedPlace[];
+  recents: SavedPlace[];
+  /** A place pinned to compare its clock with the one under the reticle. */
+  compare: SavedPlace | null;
+  /** A short message that goes away by itself, such as "Link copied". */
+  toast: string | null;
 }
 
 const start = initialView();
@@ -69,6 +40,9 @@ export const useStore = create<AppState>(() => ({
   globeFailed: false,
   notice: null,
   locating: false,
+  ...loadPlaceLists(),
+  compare: null,
+  toast: null,
 }));
 
 /** The forecast only counts when it belongs to the place under the reticle. */

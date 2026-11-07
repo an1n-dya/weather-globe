@@ -147,7 +147,8 @@ export class CityMarkers {
           right <= area[2] &&
           bottom <= area[3] &&
           !taken.some(
-            (t) => left - gap < t[2] && right + gap > t[0] && top - gap < t[3] && bottom + gap > t[1],
+            (t) =>
+              left - gap < t[2] && right + gap > t[0] && top - gap < t[3] && bottom + gap > t[1],
           );
         if (show) {
           taken.push([left, top, right, bottom]);

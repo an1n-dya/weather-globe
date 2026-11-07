@@ -1,204 +1,31 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { retryForecast, updateSettings } from "../controller";
-import { formatCoords } from "../geo/coords";
-import { polarState } from "../geo/sun";
-import {
-  formatDifference,
-  formatOffset,
-  relativeDay,
-  zoneFor,
-  zoneOffsetMinutes,
-} from "../geo/timezone";
+import { type PointerEvent, useMemo, useRef } from "react";
+import { retryForecast } from "../controller";
+import { sunDay } from "../geo/sun";
+import { zoneFor, zoneOffsetMinutes } from "../geo/timezone";
 import { forecastForSelection, useStore } from "../store";
-import type { Forecast, WeatherProblem } from "../weather/provider";
+import type { WeatherProblem } from "../weather/provider";
 import { describeWeatherCode } from "../weather/wmo";
-import {
-  formatAge,
-  formatClock,
-  formatDate,
-  formatLocalHour,
-  formatLocalTime,
-  formatTemperature,
-  formatWind,
-} from "./format";
-import { iconSrc } from "./icons";
+import { formatAge, formatTemperature } from "./format";
+import { useNow } from "./hooks";
+import { ClockSection } from "./panel/ClockSection";
+import { CompareCard } from "./panel/CompareCard";
+import { Credits } from "./panel/Credits";
+import { Daily } from "./panel/Daily";
+import { Details } from "./panel/Details";
+import { Hourly } from "./panel/Hourly";
+import { PlaceHeader } from "./panel/PlaceHeader";
+import { SettingsSection } from "./panel/SettingsSection";
+import { WeatherSkeleton } from "./panel/Skeleton";
+import { SunArc } from "./panel/SunArc";
+import { WeatherNow } from "./panel/WeatherNow";
+import { minutesInZone } from "./time";
 
-/** Re-renders on each new second, so the clock never skips or lags. */
-function useNow(): Date {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout>;
-    const schedule = () => {
-      timer = setTimeout(
-        () => {
-          setNow(new Date());
-          schedule();
-        },
-        1000 - (Date.now() % 1000),
-      );
-    };
-    schedule();
-    return () => clearTimeout(timer);
-  }, []);
-  return now;
-}
+export type SheetState = "collapsed" | "half" | "full";
+export type PanelLayout = "side" | "sheet";
 
-/** `staleNote` says when the weather shown is older than it should be. */
-function Headline({ data, staleNote }: { data: Forecast; staleNote: string | null }) {
-  const unit = useStore((s) => s.settings.unit);
-  const condition = describeWeatherCode(data.current.code);
-  return (
-    <div className="weather-headline" data-testid="weather">
-      <img
-        className="weather-icon"
-        src={iconSrc(condition.icon, data.current.isDay)}
-        alt=""
-        width={56}
-        height={56}
-      />
-      <div className="weather-temp" data-testid="temperature">
-        {formatTemperature(data.current.temp, unit)}
-      </div>
-      <div className="weather-text">
-        <div className="weather-condition">{condition.label}</div>
-        {staleNote ? (
-          <div className="weather-stale" role="status" data-testid="stale-note">
-            {staleNote}
-          </div>
-        ) : (
-          <div className="weather-feels">
-            Feels like {formatTemperature(data.current.feelsLike, unit)}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** What to say when there's no sunrise or sunset today. */
-function polarText(lat: number, now: Date): { title: string; detail: string } {
-  const polar = polarState(lat, now);
-  if (polar === "day") return { title: "Midnight sun", detail: "The sun stays up all day" };
-  if (polar === "night") return { title: "Polar night", detail: "The sun stays down all day" };
-  return { title: "No sunrise or sunset", detail: "Not today at this place" };
-}
-
-function Stats({ data, lat, now }: { data: Forecast; lat: number; now: Date }) {
-  const { unit, hour12 } = useStore((s) => s.settings);
-  const polar = data.sunrise === null || data.sunset === null ? polarText(lat, now) : null;
-  return (
-    <dl className="stats">
-      <div>
-        <dt>Wind</dt>
-        <dd>{formatWind(data.current.wind, unit)}</dd>
-      </div>
-      <div>
-        <dt>Humidity</dt>
-        <dd>{Math.round(data.current.humidity)}%</dd>
-      </div>
-      {polar ? (
-        <div className="stats-wide" data-testid="polar">
-          <dt>{polar.detail}</dt>
-          <dd>{polar.title}</dd>
-        </div>
-      ) : (
-        <>
-          <div>
-            <dt>Sunrise</dt>
-            <dd>{formatLocalTime(data.sunrise ?? "", hour12)}</dd>
-          </div>
-          <div>
-            <dt>Sunset</dt>
-            <dd>{formatLocalTime(data.sunset ?? "", hour12)}</dd>
-          </div>
-        </>
-      )}
-    </dl>
-  );
-}
-
-/** Scrolls by whole hours; arrows for mouse users, swipes and arrow keys for the rest. */
-function Hourly({ data }: { data: Forecast }) {
-  const { unit, hour12 } = useStore((s) => s.settings);
-  const listRef = useRef<HTMLUListElement>(null);
-  const [edges, setEdges] = useState({ atStart: true, atEnd: false });
-
-  const measure = () => {
-    const list = listRef.current;
-    if (!list) return;
-    setEdges({
-      atStart: list.scrollLeft <= 2,
-      atEnd: list.scrollLeft + list.clientWidth >= list.scrollWidth - 2,
-    });
-  };
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-measure when the hours change.
-  useEffect(measure, [data]);
-
-  const page = (direction: 1 | -1) => {
-    const list = listRef.current;
-    if (!list) return;
-    const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
-    list.scrollBy({ left: direction * list.clientWidth, behavior: smooth ? "smooth" : "auto" });
-  };
-
-  return (
-    <div
-      className="hourly-wrap"
-      data-at-start={edges.atStart || undefined}
-      data-at-end={edges.atEnd || undefined}
-    >
-      <ul
-        ref={listRef}
-        className="hourly"
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users need focus to scroll this strip.
-        tabIndex={0}
-        aria-label="Next 24 hours"
-        onScroll={measure}
-      >
-        {data.hourly.map((hour) => {
-          const condition = describeWeatherCode(hour.code);
-          return (
-            <li key={hour.time}>
-              <span className="hourly-time">{formatLocalHour(hour.time, hour12)}</span>
-              <img
-                className="hourly-icon"
-                src={iconSrc(condition.icon, hour.isDay)}
-                alt={condition.label}
-                width={28}
-                height={28}
-              />
-              <span className="hourly-temp">{formatTemperature(hour.temp, unit)}</span>
-            </li>
-          );
-        })}
-      </ul>
-      <button
-        type="button"
-        className="hourly-page is-prev"
-        aria-label="Earlier hours"
-        tabIndex={-1}
-        disabled={edges.atStart}
-        onClick={() => page(-1)}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M14.5 6l-6 6 6 6" />
-        </svg>
-      </button>
-      <button
-        type="button"
-        className="hourly-page is-next"
-        aria-label="Later hours"
-        tabIndex={-1}
-        disabled={edges.atEnd}
-        onClick={() => page(1)}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M9.5 6l6 6-6 6" />
-        </svg>
-      </button>
-    </div>
-  );
-}
+const ORDER: readonly SheetState[] = ["collapsed", "half", "full"];
+/** A flick faster than this, in px/ms, moves the sheet on a step. */
+const FLING = 0.45;
 
 const PROBLEM_TEXT: Readonly<Record<WeatherProblem, string>> = {
   offline: "You're offline. The weather will load once you reconnect.",
@@ -215,53 +42,23 @@ function retryText(retryAt: number | null, now: Date): string {
     : `Trying again in ${Math.round(seconds / 60)} min.`;
 }
 
-function Segmented<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: T;
-  options: ReadonlyArray<readonly [T, string]>;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <fieldset className="segmented">
-      <legend className="sr-only">{label}</legend>
-      {options.map(([option, text]) => (
-        <button
-          key={option}
-          type="button"
-          aria-pressed={value === option}
-          onClick={() => onChange(option)}
-        >
-          {text}
-        </button>
-      ))}
-    </fieldset>
-  );
+interface Props {
+  layout: PanelLayout;
+  sheet: SheetState;
+  onSheet: (state: SheetState) => void;
+  /** Visible height of the sheet in each state, in pixels. */
+  heights: Readonly<Record<SheetState, number>>;
 }
 
-const TEMPERATURE_OPTIONS = [
-  ["c", "°C"],
-  ["f", "°F"],
-] as const;
-
-const CLOCK_OPTIONS = [
-  ["12", "12h"],
-  ["24", "24h"],
-] as const;
-
-export function InfoPanel() {
+export function InfoPanel({ layout, sheet, onSheet, heights }: Props) {
   const lat = useStore((s) => s.lat);
   const lon = useStore((s) => s.lon);
   const place = useStore((s) => s.place);
   const moving = useStore((s) => s.moving);
-  const settings = useStore((s) => s.settings);
+  const unit = useStore((s) => s.settings.unit);
+  const compare = useStore((s) => s.compare);
   const forecast = useStore(forecastForSelection);
   const now = useNow();
-  const [expanded, setExpanded] = useState(false);
 
   const data = forecast?.data ?? null;
   const overOcean = place.kind === "ocean";
@@ -270,11 +67,13 @@ export function InfoPanel() {
     () => zoneFor(lat, lon, overOcean, reportedZone),
     [lat, lon, overOcean, reportedZone],
   );
-
   const offset = zoneOffsetMinutes(zone, now);
-  const viewerOffset = -now.getTimezoneOffset();
-  const day = relativeDay(now, zone);
-  const isDay = data?.current.isDay ?? true;
+  const minutes = minutesInZone(now, zone);
+  const minuteKey = Math.floor(now.getTime() / 60_000);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: recomputed once a minute, not every second.
+  const sun = useMemo(() => sunDay(lat, lon, now, minutes), [lat, lon, zone, minuteKey]);
+
+  const isDay = data?.current.isDay ?? sun.polar !== "night";
   const loading = !moving && (forecast === null || forecast.status === "loading");
   const age = forecast?.fetchedAt != null ? now.getTime() - forecast.fetchedAt : 0;
   const staleNote =
@@ -282,120 +81,201 @@ export function InfoPanel() {
       ? `${forecast.problem === "offline" ? "Offline" : "Couldn't refresh"}. From ${formatAge(age)}`
       : null;
 
+  const summary = data
+    ? `${[place.name, place.region].filter(Boolean).join(", ")}. ${formatTemperature(data.current.temp, unit)}, ${describeWeatherCode(data.current.code).label.toLowerCase()}.`
+    : "";
+
+  // Dragging the sheet: the inline height follows the finger, then the state takes over.
+  const panelRef = useRef<HTMLElement>(null);
+  const drag = useRef<{
+    id: number;
+    startY: number;
+    startHeight: number;
+    lastY: number;
+    lastTime: number;
+    velocity: number;
+    moved: boolean;
+  } | null>(null);
+  /** Set after a drag, so the release doesn't also count as a tap on the handle. */
+  const dragged = useRef(false);
+
+  const onPointerDown = (event: PointerEvent<HTMLElement>) => {
+    if (layout !== "sheet" || (event.pointerType === "mouse" && event.button !== 0)) return;
+    const target = event.target as Element;
+    // Buttons, links and the hour strip keep their own gestures; the handle always drags.
+    if (!target.closest(".sheet-handle") && target.closest("button, a, input, .hourly")) return;
+    // Full and scrolled down, the content scrolls instead.
+    if (
+      sheet === "full" &&
+      (panelRef.current?.scrollTop ?? 0) > 0 &&
+      !target.closest(".sheet-handle")
+    ) {
+      return;
+    }
+    drag.current = {
+      id: event.pointerId,
+      startY: event.clientY,
+      startHeight: heights[sheet],
+      lastY: event.clientY,
+      lastTime: event.timeStamp,
+      velocity: 0,
+      moved: false,
+    };
+    dragged.current = false;
+    // Captured from the start, so a quick flick that leaves the sheet still reaches it.
+    // The pressed element captures, so a plain tap on the handle still clicks it.
+    try {
+      (target.closest(".sheet-handle") ?? event.currentTarget).setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic events can't be captured.
+    }
+  };
+
+  const onPointerMove = (event: PointerEvent<HTMLElement>) => {
+    const state = drag.current;
+    const panel = panelRef.current;
+    if (!state || !panel || state.id !== event.pointerId) return;
+    const dy = state.startY - event.clientY;
+    if (!state.moved && Math.abs(dy) < 6) return;
+    if (!state.moved) {
+      state.moved = true;
+      panel.classList.add("is-dragging");
+    }
+    const height = Math.max(heights.collapsed, Math.min(heights.full, state.startHeight + dy));
+    panel.style.setProperty("--sheet-visible", `${height}px`);
+    const dt = Math.max(1, event.timeStamp - state.lastTime);
+    state.velocity = (state.lastY - event.clientY) / dt;
+    state.lastY = event.clientY;
+    state.lastTime = event.timeStamp;
+  };
+
+  const onPointerUp = (event: PointerEvent<HTMLElement>) => {
+    const state = drag.current;
+    const panel = panelRef.current;
+    drag.current = null;
+    if (!state || !panel || state.id !== event.pointerId || !state.moved) return;
+    dragged.current = true;
+    panel.classList.remove("is-dragging");
+    panel.style.removeProperty("--sheet-visible");
+    const height = Math.max(
+      heights.collapsed,
+      Math.min(heights.full, state.startHeight + state.startY - event.clientY),
+    );
+    let target: SheetState;
+    if (Math.abs(state.velocity) > FLING) {
+      // A flick goes one step in its direction from wherever it was let go.
+      const below = [...ORDER].reverse().find((s) => heights[s] <= height) ?? "collapsed";
+      const above = ORDER.find((s) => heights[s] >= height) ?? "full";
+      target = state.velocity > 0 ? above : below;
+      if (target === sheet) {
+        const i = ORDER.indexOf(sheet) + (state.velocity > 0 ? 1 : -1);
+        target = ORDER[Math.max(0, Math.min(ORDER.length - 1, i))] ?? sheet;
+      }
+    } else {
+      target = ORDER.reduce((best, s) =>
+        Math.abs(heights[s] - height) < Math.abs(heights[best] - height) ? s : best,
+      );
+    }
+    onSheet(target);
+  };
+
+  const stepSheet = () => {
+    // The click that ends a drag isn't a tap.
+    if (dragged.current) {
+      dragged.current = false;
+      return;
+    }
+    onSheet(sheet === "collapsed" ? "half" : sheet === "half" ? "full" : "collapsed");
+  };
+
   return (
-    <section className={`panel${expanded ? " is-expanded" : ""}`} aria-label="Selected place">
-      <button
-        type="button"
-        className="panel-handle"
-        aria-expanded={expanded}
-        aria-label={expanded ? "Show less" : "Show more"}
-        onClick={() => setExpanded((value) => !value)}
-      />
+    <section
+      ref={panelRef}
+      className="panel"
+      data-layout={layout}
+      data-sheet={layout === "sheet" ? sheet : undefined}
+      aria-label="Selected place"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onFocus={(event) => {
+        // Tabbing into a part of the sheet that's off screen brings it all up.
+        if (
+          layout === "sheet" &&
+          sheet !== "full" &&
+          (event.target as Element).closest(".panel-more")
+        ) {
+          onSheet("full");
+        }
+      }}
+    >
+      {layout === "sheet" && (
+        <button
+          type="button"
+          className="sheet-handle"
+          aria-expanded={sheet !== "collapsed"}
+          aria-label={sheet === "full" ? "Show less" : "Show more"}
+          onClick={stepSheet}
+        />
+      )}
 
-      <header className="place">
-        <h1 data-testid="place-name">{place.name}</h1>
-        <p>
-          {place.region && <span>{place.region} · </span>}
-          <span data-testid="coords">{formatCoords(lat, lon)}</span>
-        </p>
-      </header>
-
-      <section className="clock" aria-label="Local time">
-        <div className="clock-time" data-testid="clock">
-          {formatClock(now, zone, settings.hour12)}
-        </div>
-        <div className="clock-meta">
-          <span>
-            {formatDate(now, zone)}
-            {day !== "today" && <span className="clock-day"> ({day})</span>}
-          </span>
-          <span data-testid="utc-offset">{formatOffset(offset)}</span>
-          <span>{formatDifference(offset, viewerOffset)}</span>
-        </div>
-      </section>
-
-      <section
-        className={`weather${isDay ? "" : " is-night"}`}
-        aria-label="Weather"
-        aria-busy={loading}
-      >
-        {data ? (
-          <div className={forecast?.status === "loading" ? "is-refreshing" : undefined}>
-            <Headline data={data} staleNote={staleNote} />
-          </div>
-        ) : forecast?.status === "error" ? (
-          <div className="weather-empty" role="status" data-testid="weather-error">
-            <span>
-              {PROBLEM_TEXT[forecast.problem ?? "unavailable"]} {retryText(forecast.retryAt, now)}
-            </span>
-            <button type="button" className="link-button" onClick={retryForecast}>
-              Try again
-            </button>
-          </div>
-        ) : (
-          <div className="weather-empty" data-testid="weather-pending">
-            {moving ? (
-              "Stop to see the weather here"
-            ) : (
-              <span className="skeleton">Loading weather…</span>
-            )}
-          </div>
-        )}
-      </section>
-
-      <div className="details">
-        {data && (
-          <>
-            <Stats data={data} lat={lat} now={now} />
-            <Hourly data={data} />
-          </>
-        )}
-        {forecast?.status === "ready" && <p className="status-line">Updated {formatAge(age)}</p>}
-        <div className="settings">
-          <Segmented
-            label="Temperature unit"
-            value={settings.unit}
-            options={TEMPERATURE_OPTIONS}
-            onChange={(unit) => updateSettings({ unit })}
-          />
-          <Segmented
-            label="Clock format"
-            value={settings.hour12 ? "12" : "24"}
-            options={CLOCK_OPTIONS}
-            onChange={(value) => updateSettings({ hour12: value === "12" })}
-          />
-        </div>
+      <div className="panel-peek">
+        <PlaceHeader />
+        <ClockSection now={now} zone={zone} offset={offset} minutes={minutes} sun={sun} />
+        <section
+          className={`weather${isDay ? "" : " is-night"}`}
+          aria-label="Weather"
+          aria-busy={loading}
+        >
+          {data ? (
+            <div className={forecast?.status === "loading" ? "is-refreshing" : undefined}>
+              <WeatherNow data={data} staleNote={staleNote} />
+            </div>
+          ) : forecast?.status === "error" ? (
+            <div className="weather-empty" role="status" data-testid="weather-error">
+              <span>
+                {PROBLEM_TEXT[forecast.problem ?? "unavailable"]} {retryText(forecast.retryAt, now)}
+              </span>
+              <button type="button" className="link-button" onClick={retryForecast}>
+                Try again
+              </button>
+            </div>
+          ) : (
+            <div className="weather-empty" data-testid="weather-pending">
+              {moving ? (
+                "Stop to see the weather here"
+              ) : (
+                <span className="skeleton-text">Loading weather…</span>
+              )}
+            </div>
+          )}
+        </section>
       </div>
 
-      <footer className="credits">
-        <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">
-          Weather data by Open-Meteo
-        </a>
-        {" · "}
-        <a href="https://www.geonames.org/" target="_blank" rel="noreferrer">
-          GeoNames
-        </a>
-        {" · "}
-        <a href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">
-          Natural Earth
-        </a>
-        {" · "}
-        <a
-          href="https://www.ncei.noaa.gov/products/etopo-global-relief-model"
-          target="_blank"
-          rel="noreferrer"
-        >
-          NOAA ETOPO
-        </a>
-        {" · "}
-        <a
-          href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/"
-          target="_blank"
-          rel="noreferrer"
-        >
-          NASA Blue Marble
-        </a>
-      </footer>
+      <div className="panel-more">
+        {compare && <CompareCard pinned={compare} now={now} name={place.name} offset={offset} />}
+        {data ? (
+          <>
+            {forecast?.status === "ready" && (
+              <p className="status-line" data-testid="updated">
+                Updated {formatAge(age)}
+              </p>
+            )}
+            <Hourly data={data} />
+            <Daily data={data} />
+            <Details data={data} />
+          </>
+        ) : (
+          loading && <WeatherSkeleton />
+        )}
+        <SunArc sun={sun} minutes={minutes} />
+        <SettingsSection />
+        <Credits />
+      </div>
+      <p className="sr-only" data-testid="summary">
+        {summary}
+      </p>
     </section>
   );
 }
