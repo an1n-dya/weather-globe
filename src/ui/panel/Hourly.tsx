@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useStore } from "../../store";
 import type { Forecast } from "../../weather/provider";
 import { describeWeatherCode } from "../../weather/wmo";
@@ -8,7 +8,7 @@ import { iconSrc } from "../icons";
 import { Icon } from "./Icon";
 
 /** Scrolls by whole hours; arrows for mouse users, swipes and arrow keys for the rest. */
-export function Hourly({ data }: { data: Forecast }) {
+export const Hourly = memo(function Hourly({ data }: { data: Forecast }) {
   const { unit, hour12 } = useStore((s) => s.settings);
   const listRef = useRef<HTMLUListElement>(null);
   const [edges, setEdges] = useState({ atStart: true, atEnd: false });
@@ -92,4 +92,4 @@ export function Hourly({ data }: { data: Forecast }) {
       </div>
     </section>
   );
-}
+});

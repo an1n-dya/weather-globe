@@ -1,3 +1,5 @@
+import { cachedFormat } from "./format";
+
 const partFormats = new Map<string, Intl.DateTimeFormat>();
 
 /** Minutes since local midnight in a zone, with seconds as a fraction. */
@@ -30,7 +32,7 @@ export function formatMinutes(minutes: number, hour12: boolean): string {
 /** The local time in a zone, short, for a list row: "9:41 PM". */
 export function formatShortTime(date: Date, zone: string, hour12: boolean): string {
   try {
-    return new Intl.DateTimeFormat(undefined, {
+    return cachedFormat(`short|${zone}|${hour12}`, {
       timeZone: zone,
       hour: hour12 ? "numeric" : "2-digit",
       minute: "2-digit",

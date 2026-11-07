@@ -89,14 +89,22 @@ export function formatDifference(placeMinutes: number, viewerMinutes: number): s
   return `${formatDuration(diff)} ${diff > 0 ? "ahead of" : "behind"} you`;
 }
 
+const dateFormats = new Map<string, Intl.DateTimeFormat>();
+
 /** The calendar date in a zone, as YYYY-MM-DD. */
 function dateKey(date: Date, zone?: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: zone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+  const key = zone ?? "";
+  let format = dateFormats.get(key);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en-CA", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    dateFormats.set(key, format);
+  }
+  return format.format(date);
 }
 
 /**

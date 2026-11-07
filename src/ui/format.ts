@@ -86,9 +86,24 @@ export function minutesOfDay(iso: string): number {
   return Number(iso.slice(11, 13)) * 60 + Number(iso.slice(14, 16));
 }
 
+/** Building a formatter is far slower than using one, and the clock formats every second. */
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+export function cachedFormat(
+  key: string,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  let format = formatters.get(key);
+  if (!format) {
+    format = new Intl.DateTimeFormat(undefined, options);
+    formatters.set(key, format);
+  }
+  return format;
+}
+
 export function formatClock(date: Date, zone: string, hour12: boolean): string {
   // `hourCycle` rather than `hour12: false`, which printed midnight as 24:00 in older browsers.
-  return new Intl.DateTimeFormat(undefined, {
+  return cachedFormat(`clock|${zone}|${hour12}`, {
     timeZone: zone,
     hour: hour12 ? "numeric" : "2-digit",
     minute: "2-digit",
@@ -98,7 +113,7 @@ export function formatClock(date: Date, zone: string, hour12: boolean): string {
 }
 
 export function formatDate(date: Date, zone: string): string {
-  return new Intl.DateTimeFormat(undefined, {
+  return cachedFormat(`date|${zone}`, {
     timeZone: zone,
     weekday: "short",
     month: "short",

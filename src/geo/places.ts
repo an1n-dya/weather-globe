@@ -2,6 +2,7 @@ import { around, distance as kmBetween } from "geokdbush";
 import KDBush from "kdbush";
 import { dataUrl } from "../data";
 import { inflate } from "../inflate";
+import { type CityRow, decodeCities } from "./citiesData";
 import { normalizeLon } from "./coords";
 import { Regions, SURFACE } from "./regions";
 
@@ -14,8 +15,7 @@ export interface Place {
   region: string;
 }
 
-/** [name, country code, lat, lon, population] */
-export type CityRow = [string, string, number, number, number];
+export type { CityRow } from "./citiesData";
 
 const SEARCH_RADIUS_KM = 150;
 /** Within this distance a place is named outright; further away it is "Near X". */
@@ -101,14 +101,14 @@ export async function loadRegions(): Promise<Regions> {
   return new Regions(await inflate(new Uint8Array(await response.arrayBuffer())));
 }
 
+async function loadCities(): Promise<CityRow[]> {
+  const response = await fetch(dataUrl("cities.bin"));
+  if (!response.ok) throw new Error(`Could not load place data: HTTP ${response.status}`);
+  return parseCityRows(decodeCities(await inflate(new Uint8Array(await response.arrayBuffer()))));
+}
+
 export async function loadPlaceIndex(): Promise<{ index: PlaceIndex; cities: CityRow[] }> {
-  const [citiesResponse, regions] = await Promise.all([
-    fetch(dataUrl("cities.json")),
-    loadRegions(),
-  ]);
-  if (!citiesResponse.ok)
-    throw new Error(`Could not load place data: HTTP ${citiesResponse.status}`);
-  const cities = parseCityRows(await citiesResponse.json());
+  const [cities, regions] = await Promise.all([loadCities(), loadRegions()]);
   return { index: new PlaceIndex(cities, regions), cities };
 }
 

@@ -46,7 +46,8 @@ export function SearchBox() {
   const favorites = useStore((s) => s.favorites);
   const recents = useStore((s) => s.recents);
   const hour12 = useStore((s) => s.settings.hour12);
-  const now = useNow();
+  // The local times beside each place only need to tick while the list is open.
+  const now = useNow(open);
 
   // "/" anywhere focuses the search, as on many sites.
   useEffect(() => {

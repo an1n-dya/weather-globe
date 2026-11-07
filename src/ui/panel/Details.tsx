@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { memo } from "react";
 import { useStore } from "../../store";
 import type { Forecast } from "../../weather/provider";
 import {
@@ -25,7 +26,9 @@ function Card({
     <div className="detail">
       <dt>{title}</dt>
       <dd>
-        <span className="detail-value">{value}</span>
+        <span className={value === MISSING ? "detail-value is-missing" : "detail-value"}>
+          {value}
+        </span>
         {children}
         {note && <span className="detail-note">{note}</span>}
       </dd>
@@ -33,9 +36,10 @@ function Card({
   );
 }
 
-const MISSING = "—";
+/** Shown in place of a value the service didn't report here, rather than a dash or a zero. */
+const MISSING = "Not reported";
 
-export function Details({ data }: { data: Forecast }) {
+export const Details = memo(function Details({ data }: { data: Forecast }) {
   const { unit, wind } = useStore((s) => s.settings);
   const c = data.current;
   const uv = c.uvIndex ?? data.daily[0]?.uvMax ?? null;
@@ -99,4 +103,4 @@ export function Details({ data }: { data: Forecast }) {
       </dl>
     </section>
   );
-}
+});

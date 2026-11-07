@@ -18,7 +18,11 @@ export default defineConfig({
   base: "./",
   preview: { headers: productionHeaders },
   // three.js is one large module that can't be split further, and it loads lazily.
-  build: { chunkSizeWarningLimit: 800 },
+  // Source maps are published too: the code is GPL, and they make reports from the field readable.
+  build: { chunkSizeWarningLimit: 800, sourcemap: true },
+  // Module workers can split code, so the globe worker doesn't carry the
+  // inflater that only browsers without DecompressionStream need.
+  worker: { format: "es" },
   plugins: [
     react(),
     VitePWA({

@@ -1006,6 +1006,11 @@ button:disabled {
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
+.detail-value.is-missing {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-muted);
+}
 .detail-note {
   margin-top: 2px;
   font-size: var(--text-xs);

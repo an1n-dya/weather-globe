@@ -1,6 +1,7 @@
 /**
  * Downloads the GeoNames cities15000 dump (CC BY 4.0) and writes:
- *   public/data/cities.json    every town for nearest-place names and night lights
+ *   public/data/cities.bin     every town for nearest-place names and night lights
+ *                              (columns, deflated; see src/geo/citiesData.ts)
  *   src/data/majorCities.json  about 100 well-spread cities for weather markers
  *
  * The archive is read in memory and only ever parsed as tab-separated text.
@@ -8,7 +9,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { unzipSync } from "fflate";
+import { deflateSync, unzipSync } from "fflate";
+import { type CityRow, encodeCities } from "../src/geo/citiesData";
 import { angularDistanceDeg } from "../src/geo/coords";
 
 const SOURCE = "https://download.geonames.org/export/dump/cities15000.zip";
@@ -109,10 +111,10 @@ const round = (value: number) => Math.round(value * 100) / 100;
 const cities = await download();
 const major = selectMajor(cities);
 
-// Compact rows: [name, country, lat, lon, population].
-const rows = cities.map((c) => [c.name, c.country, round(c.lat), round(c.lon), c.pop]);
+// Rows of [name, country, lat, lon, population], largest first.
+const rows: CityRow[] = cities.map((c) => [c.name, c.country, round(c.lat), round(c.lon), c.pop]);
 mkdirSync(join(root, "public/data"), { recursive: true });
-writeFileSync(join(root, "public/data/cities.json"), JSON.stringify(rows));
+writeFileSync(join(root, "public/data/cities.bin"), deflateSync(encodeCities(rows), { level: 9 }));
 
 mkdirSync(join(root, "src/data"), { recursive: true });
 writeFileSync(

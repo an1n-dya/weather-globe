@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { useStore } from "../../store";
 import type { Forecast } from "../../weather/provider";
 import { describeWeatherCode } from "../../weather/wmo";
@@ -5,7 +6,7 @@ import { formatDayName, formatTemperature } from "../format";
 import { iconSrc } from "../icons";
 
 /** The week ahead, each day's range drawn on one scale shared by the whole week. */
-export function Daily({ data }: { data: Forecast }) {
+export const Daily = memo(function Daily({ data }: { data: Forecast }) {
   const unit = useStore((s) => s.settings.unit);
   const days = data.daily;
   if (days.length === 0) return null;
@@ -64,4 +65,4 @@ export function Daily({ data }: { data: Forecast }) {
       </ol>
     </section>
   );
-}
+});

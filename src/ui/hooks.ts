@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 
-/** Re-renders on each new second, so clocks never skip or lag. */
-export function useNow(): Date {
+/** Re-renders on each new second, so clocks never skip or lag. Paused when not `enabled`. */
+export function useNow(enabled = true): Date {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
+    if (!enabled) return;
+    setNow(new Date());
     let timer: ReturnType<typeof setTimeout>;
     const schedule = () => {
       timer = setTimeout(
@@ -16,7 +18,7 @@ export function useNow(): Date {
     };
     schedule();
     return () => clearTimeout(timer);
-  }, []);
+  }, [enabled]);
   return now;
 }
 
