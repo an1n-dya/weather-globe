@@ -47,11 +47,13 @@ export const Hourly = memo(function Hourly({ data }: { data: Forecast }) {
           aria-label="Next 24 hours"
           onScroll={measure}
         >
-          {data.hourly.map((hour) => {
+          {data.hourly.map((hour, i) => {
             const condition = describeWeatherCode(hour.code);
             const chance = hour.precipChance ?? 0;
             return (
-              <li key={hour.time}>
+              // An hour can repeat on the night the clocks go back.
+              // biome-ignore lint/suspicious/noArrayIndexKey: the list is never reordered.
+              <li key={`${i}-${hour.time}`}>
                 <span className="hourly-time">{formatLocalHour(hour.time, hour12)}</span>
                 <img
                   className="hourly-icon"

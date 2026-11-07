@@ -8,13 +8,19 @@ function DayProgress({ minutes, sun }: { minutes: number; sun: SunDay }) {
   const percent = (value: number) => `${((value / 1440) * 100).toFixed(2)}%`;
   const rise = sun.sunrise ?? (sun.polar === "day" ? 0 : sun.sunset === null ? 1440 : 0);
   const set = sun.sunset ?? (sun.polar === "night" ? 0 : 1440);
+  // Near the polar circles the sun can set after midnight and rise again before dawn.
+  const wraps = sun.sunrise !== null && sun.sunset !== null && sun.sunset < sun.sunrise;
   const label = `${Math.round((minutes / 1440) * 100)}% of the local day has passed`;
   return (
     <div className="day-progress" role="img" aria-label={label}>
       <div
         className="day-track"
+        data-wraps={wraps || undefined}
         style={
-          { "--rise": percent(Math.min(rise, set)), "--set": percent(set) } as React.CSSProperties
+          {
+            "--rise": percent(wraps ? rise : Math.min(rise, set)),
+            "--set": percent(set),
+          } as React.CSSProperties
         }
       >
         <span className="day-now" style={{ left: percent(minutes) }} />

@@ -14,13 +14,16 @@ interface ApiMock {
   sun: { sunrise: string[]; sunset: string[] } | null;
   /** How long a search takes to answer. */
   searchDelayMs: number;
+  /** The time zone to report, instead of one picked from the latitude. */
+  zone: string | null;
 }
 
-function forecastBody(url: URL, sun: ApiMock["sun"]) {
+function forecastBody(url: URL, { sun, zone: reported }: ApiMock) {
   const lat = Number(url.searchParams.get("latitude"));
   const lon = Number(url.searchParams.get("longitude"));
   const nearKathmandu = Math.abs(lat - 27.7) < 1 && Math.abs(lon - 85.3) < 1;
-  const zone = lat > 30 ? "Asia/Tokyo" : nearKathmandu ? "Asia/Kathmandu" : "Asia/Kolkata";
+  const zone =
+    reported ?? (lat > 30 ? "Asia/Tokyo" : nearKathmandu ? "Asia/Kathmandu" : "Asia/Kolkata");
   const hours = Array.from({ length: 7 * 24 }, (_, i) => {
     const day = String(4 + Math.floor(i / 24)).padStart(2, "0");
     return `2026-11-${day}T${String(i % 24).padStart(2, "0")}:00`;
@@ -72,6 +75,7 @@ async function mockApi(page: Page): Promise<ApiMock> {
     delayMs: 0,
     sun: null,
     searchDelayMs: 0,
+    zone: null,
   };
   await page.route("https://api.open-meteo.com/**", async (route: Route) => {
     const url = new URL(route.request().url());
@@ -97,7 +101,7 @@ async function mockApi(page: Page): Promise<ApiMock> {
       await route.fulfill({ status: 429, headers: { "Retry-After": "30" }, json: { error: true } });
       return;
     }
-    await route.fulfill({ json: forecastBody(url, mock.sun) });
+    await route.fulfill({ json: forecastBody(url, mock) });
   });
   await page.route("https://geocoding-api.open-meteo.com/**", async (route) => {
     if (mock.searchDelayMs) await new Promise((resolve) => setTimeout(resolve, mock.searchDelayMs));
@@ -636,6 +640,37 @@ test("polar night says so instead of showing no sunrise", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-12-10T12:00:00Z"));
   await page.goto("/#80.00,20.00");
   await expect(page.getByTestId("polar")).toContainText("Polar night", { timeout: 20_000 });
+});
+
+test("the sun arc stays right when the sun sets after midnight", async ({ page }) => {
+  const mock = await mockApi(page);
+  mock.zone = "Europe/Oslo";
+  // Tromsø on 18 May: the sun sets at about 00:28 and is back up by 00:52.
+  await page.clock.setFixedTime(new Date("2026-05-18T10:00:00Z"));
+  await page.goto("/#69.65,18.96");
+  await globeReady(page);
+  await expect(page.getByTestId("temperature")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(".sun-next")).toContainText("Sunset in");
+  await expect(page.locator(".sun-dot")).not.toHaveClass(/is-night/);
+  await expect(page.locator(".day-track")).toHaveAttribute("data-wraps", "true");
+});
+
+test("a saved spot at sea keeps the sea's time zone", async ({ page }) => {
+  const mock = await mockApi(page);
+  // Without the weather's own zone, the app's choice of zone shows.
+  mock.mode = "fail";
+  // Open water near the Phoenix Islands, whose zone is a day ahead of the sea around them.
+  await page.goto("/#-5.00,-170.00");
+  await globeReady(page);
+  await expect(page.getByTestId("utc-offset")).toHaveText("UTC−11");
+  await page.getByRole("button", { name: "Save this place" }).click();
+  await page.goto("/#30.00,-40.00");
+  await page.reload();
+  await globeReady(page);
+  await expect(page.getByTestId("utc-offset")).toHaveText("UTC−3");
+  await page.getByRole("combobox", { name: "Search for a place" }).focus();
+  await page.getByRole("group", { name: "Saved places" }).getByRole("option").first().click();
+  await expect(page.getByTestId("utc-offset")).toHaveText("UTC−11", { timeout: 20_000 });
 });
 
 test("the hourly strip shows whole hours and pages through the day", async ({ page, isMobile }) => {

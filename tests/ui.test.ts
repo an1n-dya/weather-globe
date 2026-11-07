@@ -170,6 +170,12 @@ describe("saved places", () => {
     expect(list.filter((p) => samePlace(p, paris))).toHaveLength(1);
   });
 
+  it("treats places either side of the date line as the same", () => {
+    expect(samePlace({ lat: -16.8, lon: 179.999 }, { lat: -16.8, lon: -179.998 })).toBe(true);
+    expect(samePlace({ lat: -16.8, lon: 179.9 }, { lat: -16.8, lon: -179.9 })).toBe(false);
+    expect(samePlace(paris, { ...paris, lon: paris.lon + 360 })).toBe(true);
+  });
+
   it("survives damaged or missing storage", () => {
     vi.stubGlobal("localStorage", {
       getItem: () =>

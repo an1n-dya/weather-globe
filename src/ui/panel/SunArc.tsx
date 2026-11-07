@@ -1,4 +1,4 @@
-import type { SunDay } from "../../geo/sun";
+import { type SunDay, sunPhase } from "../../geo/sun";
 import { formatDuration } from "../../geo/timezone";
 import { useStore } from "../../store";
 import { formatDayLength } from "../format";
@@ -41,27 +41,13 @@ export function SunArc({ sun, minutes }: { sun: SunDay; minutes: number }) {
     );
   }
 
-  const rise = sun.sunrise ?? 0;
-  const set = sun.sunset ?? 1440;
-  const isDay =
-    sun.sunrise !== null && sun.sunset !== null
-      ? minutes >= rise && minutes < set
-      : sun.daylight > 720;
-  let x: number;
-  let y: number;
-  let next: string;
-  if (isDay) {
-    const t = Math.min(1, Math.max(0, (minutes - rise) / Math.max(1, set - rise)));
-    [x, y] = along(t, LEFT, RIGHT, HORIZON, PEAK);
-    next = sun.sunset !== null ? `Sunset in ${formatDuration(set - minutes)}` : "";
-  } else {
-    const night = 1440 - (set - rise);
-    const since = (minutes - set + 1440) % 1440;
-    const t = Math.min(1, Math.max(0, since / Math.max(1, night)));
-    [x, y] = along(t, RIGHT, LEFT, HORIZON, LOW);
-    const until = (rise - minutes + 1440) % 1440;
-    next = sun.sunrise !== null ? `Sunrise in ${formatDuration(until)}` : "";
-  }
+  const phase = sunPhase(sun, minutes);
+  const [x, y] = phase.isDay
+    ? along(phase.progress, LEFT, RIGHT, HORIZON, PEAK)
+    : along(phase.progress, RIGHT, LEFT, HORIZON, LOW);
+  const next = phase.next
+    ? `${phase.next.event === "sunrise" ? "Sunrise" : "Sunset"} in ${formatDuration(phase.next.minutes)}`
+    : "";
 
   return (
     <section className="sun" aria-label="Sun">
@@ -77,7 +63,7 @@ export function SunArc({ sun, minutes }: { sun: SunDay; minutes: number }) {
         />
         <line className="sun-horizon" x1={8} y1={HORIZON} x2={W - 8} y2={HORIZON} />
         <circle
-          className={isDay ? "sun-dot" : "sun-dot is-night"}
+          className={phase.isDay ? "sun-dot" : "sun-dot is-night"}
           cx={x}
           cy={Math.min(y, 108)}
           r={7}
@@ -86,7 +72,7 @@ export function SunArc({ sun, minutes }: { sun: SunDay; minutes: number }) {
       <dl className="sun-times">
         <div>
           <dt>Sunrise</dt>
-          <dd>{sun.sunrise === null ? "None" : formatMinutes(rise, hour12)}</dd>
+          <dd>{sun.sunrise === null ? "None" : formatMinutes(sun.sunrise, hour12)}</dd>
         </div>
         <div>
           <dt>Daylight</dt>
@@ -94,7 +80,7 @@ export function SunArc({ sun, minutes }: { sun: SunDay; minutes: number }) {
         </div>
         <div>
           <dt>Sunset</dt>
-          <dd>{sun.sunset === null ? "None" : formatMinutes(set, hour12)}</dd>
+          <dd>{sun.sunset === null ? "None" : formatMinutes(sun.sunset, hour12)}</dd>
         </div>
       </dl>
       {next && <p className="sun-next">{next}</p>}

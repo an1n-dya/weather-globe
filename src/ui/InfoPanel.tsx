@@ -1,6 +1,6 @@
 import { type PointerEvent, useMemo, useRef } from "react";
 import { retryForecast } from "../controller";
-import { sunDay } from "../geo/sun";
+import { sunDay, sunPhase } from "../geo/sun";
 import { zoneFor, zoneOffsetMinutes } from "../geo/timezone";
 import { forecastForSelection, useStore } from "../store";
 import type { WeatherProblem } from "../weather/provider";
@@ -73,7 +73,7 @@ export function InfoPanel({ layout, sheet, onSheet, heights }: Props) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: recomputed once a minute, not every second.
   const sun = useMemo(() => sunDay(lat, lon, now, minutes), [lat, lon, zone, minuteKey]);
 
-  const isDay = data?.current.isDay ?? sun.polar !== "night";
+  const isDay = data?.current.isDay ?? sunPhase(sun, minutes).isDay;
   const loading = !moving && (forecast === null || forecast.status === "loading");
   const age = forecast?.fetchedAt != null ? now.getTime() - forecast.fetchedAt : 0;
   const staleNote =

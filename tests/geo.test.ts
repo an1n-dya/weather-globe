@@ -8,7 +8,14 @@ import {
   vec3ToLatLon,
 } from "../src/geo/coords";
 import { type CityRow, PlaceIndex, parseCityRows } from "../src/geo/places";
-import { isSunUp, polarState, subsolarPoint, sunAltitudeDeg, sunDay } from "../src/geo/sun";
+import {
+  isSunUp,
+  polarState,
+  subsolarPoint,
+  sunAltitudeDeg,
+  sunDay,
+  sunPhase,
+} from "../src/geo/sun";
 import {
   formatDifference,
   formatDuration,
@@ -131,6 +138,58 @@ describe("sun position", () => {
     expect(svalbard).toMatchObject({ sunrise: null, sunset: null, polar: "night", daylight: 0 });
     const antarctic = sunDay(-78, 166, new Date("2026-12-10T00:00:00Z"), 780);
     expect(antarctic).toMatchObject({ polar: "day", daylight: 1440 });
+  });
+
+  it("handles a sunset after midnight followed by an early sunrise", () => {
+    // Tromsø on 18 May 2026: the sun dips below the horizon from about 00:28 to 00:52 CEST.
+    const noon = new Date("2026-05-18T10:00:00Z");
+    const tromso = sunDay(69.65, 18.96, noon, 720);
+    expect(tromso.polar).toBeNull();
+    expect(tromso.sunset!).toBeLessThan(tromso.sunrise!);
+    expect(tromso.daylight).toBeGreaterThan(1380);
+    // At noon it is day, with the next sunset early tomorrow morning.
+    const midday = sunPhase(tromso, 720);
+    expect(midday.isDay).toBe(true);
+    expect(midday.next?.event).toBe("sunset");
+    expect(midday.next!.minutes).toBeCloseTo(1440 - 720 + tromso.sunset!, 5);
+    expect(midday.progress).toBeGreaterThan(0.4);
+    expect(midday.progress).toBeLessThan(0.6);
+    // In the short night between the two, it is dark until the sun comes back up.
+    const between = (tromso.sunset! + tromso.sunrise!) / 2;
+    const night = sunPhase(tromso, between);
+    expect(night.isDay).toBe(false);
+    expect(night.next?.event).toBe("sunrise");
+    expect(night.next!.minutes).toBeCloseTo(tromso.sunrise! - between, 5);
+    expect(sunPhase(tromso, 5).isDay).toBe(true);
+  });
+
+  it("says day or night from the sun times on ordinary and polar days", () => {
+    const london = sunDay(51.51, -0.13, new Date("2026-11-03T12:00:00Z"), 720);
+    expect(sunPhase(london, 720)).toMatchObject({ isDay: true, next: { event: "sunset" } });
+    const evening = sunPhase(london, 20 * 60);
+    expect(evening).toMatchObject({ isDay: false, next: { event: "sunrise" } });
+    // Tomorrow's sunrise is estimated from today's.
+    expect(evening.next!.minutes).toBeCloseTo(london.sunrise! + 240, 5);
+    expect(sunPhase({ sunrise: null, sunset: null, daylight: 1440, polar: "day" }, 0).isDay).toBe(
+      true,
+    );
+    expect(sunPhase({ sunrise: null, sunset: null, daylight: 0, polar: "night" }, 720).isDay).toBe(
+      false,
+    );
+    // The sun rises and doesn't set again before midnight.
+    const risesOnly = { sunrise: 90, sunset: null, daylight: 1350, polar: null };
+    expect(sunPhase(risesOnly, 60)).toMatchObject({
+      isDay: false,
+      next: { event: "sunrise", minutes: 30 },
+    });
+    expect(sunPhase(risesOnly, 600)).toMatchObject({ isDay: true, next: null });
+    // The sun sets and doesn't come back before midnight.
+    const setsOnly = { sunrise: null, sunset: 800, daylight: 800, polar: null };
+    expect(sunPhase(setsOnly, 700)).toMatchObject({
+      isDay: true,
+      next: { event: "sunset", minutes: 100 },
+    });
+    expect(sunPhase(setsOnly, 900)).toMatchObject({ isDay: false, next: null });
   });
 
   it("moves west by 15° each hour", () => {

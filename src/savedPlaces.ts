@@ -20,7 +20,8 @@ export function samePlace(
   a: { lat: number; lon: number },
   b: { lat: number; lon: number },
 ): boolean {
-  return Math.abs(a.lat - b.lat) < 0.01 && Math.abs(a.lon - b.lon) < 0.01;
+  const dLon = Math.abs(a.lon - b.lon) % 360;
+  return Math.abs(a.lat - b.lat) < 0.01 && Math.min(dLon, 360 - dLon) < 0.01;
 }
 
 const isPlace = (value: unknown): value is SavedPlace => {

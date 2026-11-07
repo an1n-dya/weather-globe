@@ -736,6 +736,18 @@ button:disabled {
   );
   opacity: 0.85;
 }
+/* Daylight on both sides of a short night: set comes before rise. */
+.day-track[data-wraps] {
+  background: linear-gradient(
+    to right,
+    var(--day) 0,
+    var(--day) calc(var(--set) - 1%),
+    var(--night) calc(var(--set) + 1%),
+    var(--night) calc(var(--rise) - 1%),
+    var(--day) calc(var(--rise) + 1%),
+    var(--day) 100%
+  );
+}
 .day-now {
   position: absolute;
   top: 50%;

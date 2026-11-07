@@ -96,8 +96,10 @@ function goTo(lat: number, lon: number, distance?: number): void {
 }
 
 export function goToNamed(lat: number, lon: number, name: string, region: string): void {
+  // A saved spot at sea stays at sea, which decides how its time zone is found.
+  const kind = placeIndex?.placeAt(lat, lon).kind === "ocean" ? "ocean" : "city";
   // The camera can't reach the exact poles, so compare against where it will stop.
-  namedPlace = { kind: "city", name, region, lat: clampViewLat(lat), lon };
+  namedPlace = { kind, name, region, lat: clampViewLat(lat), lon };
   goTo(lat, lon, scene?.arrivalDistance);
   rememberRecent({ name, region, lat, lon });
 }

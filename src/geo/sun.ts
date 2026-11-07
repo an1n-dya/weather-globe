@@ -87,6 +87,65 @@ export function sunDay(lat: number, lon: number, now: Date, minutesNow: number):
   return { sunrise, sunset, daylight: Math.round(daylight), polar };
 }
 
+export interface SunPhase {
+  isDay: boolean;
+  /** How far through the current stretch of daylight or darkness, from 0 to 1. */
+  progress: number;
+  /** The next sunrise or sunset, in minutes from now, when the day has one. */
+  next: { event: "sunrise" | "sunset"; minutes: number } | null;
+}
+
+const wrap = (minutes: number) => ((minutes % 1440) + 1440) % 1440;
+
+/**
+ * Day or night at `minutes` after local midnight, from that day's sun times.
+ * Near the polar circles the sun can set just after midnight and rise again
+ * before dawn, so sunset may come before sunrise on the local clock.
+ */
+export function sunPhase(sun: SunDay, minutes: number): SunPhase {
+  const { sunrise, sunset } = sun;
+  if (sunrise !== null && sunset !== null) {
+    const isDay =
+      sunrise < sunset
+        ? minutes >= sunrise && minutes < sunset
+        : minutes >= sunrise || minutes < sunset;
+    const dayLength = wrap(sunset - sunrise) || 1440;
+    const nightLength = Math.max(1, 1440 - dayLength);
+    return isDay
+      ? {
+          isDay,
+          progress: Math.min(1, wrap(minutes - sunrise) / dayLength),
+          next: { event: "sunset", minutes: wrap(sunset - minutes) },
+        }
+      : {
+          isDay,
+          progress: Math.min(1, wrap(minutes - sunset) / nightLength),
+          next: { event: "sunrise", minutes: wrap(sunrise - minutes) },
+        };
+  }
+  // The sun rises and stays up past midnight.
+  if (sunrise !== null) {
+    return minutes >= sunrise
+      ? { isDay: true, progress: (minutes - sunrise) / Math.max(1, 1440 - sunrise), next: null }
+      : {
+          isDay: false,
+          progress: minutes / Math.max(1, sunrise),
+          next: { event: "sunrise", minutes: sunrise - minutes },
+        };
+  }
+  // Up since before midnight, the sun sets and stays down.
+  if (sunset !== null) {
+    return minutes < sunset
+      ? {
+          isDay: true,
+          progress: minutes / Math.max(1, sunset),
+          next: { event: "sunset", minutes: sunset - minutes },
+        }
+      : { isDay: false, progress: (minutes - sunset) / Math.max(1, 1440 - sunset), next: null };
+  }
+  return { isDay: sun.polar === "day", progress: minutes / 1440, next: null };
+}
+
 /**
  * Whether the sun stays up all day ("day"), stays down all day ("night"), or
  * rises and sets (null), from its highest and lowest heights on that date.
